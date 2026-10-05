@@ -1,0 +1,26 @@
+# Dependencies
+node_modules
+dist
+dist-ssr
+
+# Generated single-file preview build
+preview.html
+icon-sheet.html
+
+# Rust / Tauri
+src-tauri/target
+src-tauri/gen
+
+# Editor / OS
+.DS_Store
+*.log
+.vscode/*
+!.vscode/extensions.json
+.idea
+
+# Local env
+.env
+.env.local
+
+# Freebuff local app state
+.freebuff

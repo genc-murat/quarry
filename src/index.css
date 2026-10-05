@@ -1,0 +1,209 @@
+@import "tailwindcss";
+
+/* Map the design tokens to Tailwind's theme so utilities like `bg-background`
+   resolve to our CSS variables. */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-surface: var(--surface);
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+  --font-mono: "SFMono-Regular", ui-monospace, "JetBrains Mono", Menlo, monospace;
+}
+
+:root {
+  --radius: 0.75rem;
+  --mono-font-size: 12px;
+  --app-mono: "SFMono-Regular", ui-monospace, "JetBrains Mono", Menlo, monospace;
+
+  --background: oklch(0.985 0.004 264);
+  --foreground: oklch(0.23 0.02 264);
+  --surface: oklch(0.96 0.006 264);
+
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.23 0.02 264);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.23 0.02 264);
+
+  --primary: oklch(0.62 0.19 259);
+  --primary-foreground: oklch(0.99 0.005 260);
+  --secondary: oklch(0.955 0.008 264);
+  --secondary-foreground: oklch(0.3 0.02 264);
+  --muted: oklch(0.955 0.008 264);
+  --muted-foreground: oklch(0.55 0.02 264);
+  --accent: oklch(0.94 0.035 265);
+  --accent-foreground: oklch(0.32 0.05 265);
+  --destructive: oklch(0.6 0.21 22);
+  --destructive-foreground: oklch(0.99 0 0);
+  --success: oklch(0.66 0.16 152);
+  --warning: oklch(0.78 0.15 78);
+
+  --border: oklch(0.9 0.01 264);
+  --input: oklch(0.92 0.01 264);
+  --ring: oklch(0.62 0.19 259);
+}
+
+.dark {
+  --background: oklch(0.17 0.017 265);
+  --foreground: oklch(0.95 0.008 260);
+  --surface: oklch(0.215 0.019 265);
+
+  --card: oklch(0.215 0.019 265);
+  --card-foreground: oklch(0.95 0.008 260);
+  --popover: oklch(0.235 0.02 265);
+  --popover-foreground: oklch(0.95 0.008 260);
+
+  --primary: oklch(0.7 0.17 259);
+  --primary-foreground: oklch(0.16 0.02 265);
+  --secondary: oklch(0.27 0.02 265);
+  --secondary-foreground: oklch(0.93 0.008 260);
+  --muted: oklch(0.26 0.018 265);
+  --muted-foreground: oklch(0.68 0.02 260);
+  --accent: oklch(0.32 0.045 265);
+  --accent-foreground: oklch(0.93 0.02 265);
+  --destructive: oklch(0.66 0.2 22);
+  --destructive-foreground: oklch(0.15 0 0);
+  --success: oklch(0.72 0.15 152);
+  --warning: oklch(0.82 0.14 80);
+
+  --border: oklch(0.3 0.02 265);
+  --input: oklch(0.33 0.02 265);
+  --ring: oklch(0.7 0.17 259);
+}
+
+/* ---- Accent palettes -------------------------------------------------- */
+
+[data-palette="ocean"] {
+  --primary: oklch(0.64 0.16 235);
+  --ring: oklch(0.64 0.16 235);
+  --accent: oklch(0.94 0.04 235);
+}
+.dark[data-palette="ocean"] {
+  --primary: oklch(0.72 0.14 233);
+  --ring: oklch(0.72 0.14 233);
+  --accent: oklch(0.33 0.05 235);
+}
+
+[data-palette="sunset"] {
+  --primary: oklch(0.68 0.19 33);
+  --ring: oklch(0.68 0.19 33);
+  --accent: oklch(0.95 0.04 45);
+}
+.dark[data-palette="sunset"] {
+  --primary: oklch(0.74 0.17 38);
+  --ring: oklch(0.74 0.17 38);
+  --accent: oklch(0.34 0.06 40);
+}
+
+[data-palette="forest"] {
+  --primary: oklch(0.63 0.15 158);
+  --ring: oklch(0.63 0.15 158);
+  --accent: oklch(0.94 0.04 158);
+}
+.dark[data-palette="forest"] {
+  --primary: oklch(0.71 0.15 158);
+  --ring: oklch(0.71 0.15 158);
+  --accent: oklch(0.32 0.05 158);
+}
+
+[data-palette="rose"] {
+  --primary: oklch(0.64 0.2 350);
+  --ring: oklch(0.64 0.2 350);
+  --accent: oklch(0.95 0.04 350);
+}
+.dark[data-palette="rose"] {
+  --primary: oklch(0.72 0.18 350);
+  --ring: oklch(0.72 0.18 350);
+  --accent: oklch(0.34 0.06 350);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family:
+    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+
+/* Elements flagged as drag regions let the user move the frameless window. */
+[data-tauri-drag-region] {
+  cursor: default;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: color-mix(in oklch, var(--muted-foreground) 34%, transparent);
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in oklch, var(--muted-foreground) 55%, transparent);
+  background-clip: content-box;
+}
+
+/* CodeMirror should blend into the app chrome. */
+.cm-editor {
+  height: 100%;
+  font-family: var(--app-mono);
+  font-size: var(--mono-font-size, 12px);
+}
+.cm-editor.cm-focused {
+  outline: none;
+}
+
+/* Settings-driven text helpers (see `applyAppearance`). */
+.font-mono-app {
+  font-family: var(--app-mono);
+}
+.text-mono-size {
+  font-size: var(--mono-font-size);
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+.animate-fade-in {
+  animation: fade-in 0.14s ease-out;
+}

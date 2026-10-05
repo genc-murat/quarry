@@ -1,0 +1,945 @@
+//! Dialect-aware SQL generation for the object context menu.
+//!
+//! Everything here is pure string building so it can be unit tested without a
+//! database. Identifiers are always quoted through [`Dialect::quote`] and
+//! string literals through [`Dialect::string_literal`] — user supplied names
+//! never reach the server unquoted.
+
+use serde_json::Value;
+
+use crate::error::{DriverError, Result};
+use crate::models::{
+    ColumnDefinition, CreateTableRequest, IndexDefinition, IndexKind, MaintenanceKind,
+    ObjectAction, ObjectActionRequest, ObjectKind, ObjectSchema, RowChangeRequest, RowValue,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dialect {
+    /// Portable double-quote identifiers (PostgreSQL and the SQL standard).
+    Ansi,
+    Postgres,
+    MySql,
+}
+
+impl Dialect {
+    /// Quote a single identifier, escaping the quote character by doubling it.
+    pub fn quote(self, name: &str) -> String {
+        match self {
+            Dialect::MySql => format!("`{}`", name.replace('`', "``")),
+            Dialect::Ansi | Dialect::Postgres => format!("\"{}\"", name.replace('"', "\"\"")),
+        }
+    }
+
+    /// Quote an optional qualifier plus the object name.
+    pub fn quote_qualified(self, qualifier: Option<&str>, object: &str) -> String {
+        match qualifier.filter(|value| !value.is_empty()) {
+            Some(qualifier) => format!("{}.{}", self.quote(qualifier), self.quote(object)),
+            None => self.quote(object),
+        }
+    }
+
+    /// Quote a string literal by doubling embedded single quotes.
+    pub fn string_literal(self, value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    /// The character used to quote identifiers, for UI templates.
+    pub fn quote_char(self) -> &'static str {
+        match self {
+            Dialect::MySql => "`",
+            _ => "\"",
+        }
+    }
+}
+
+fn qualified(request: &ObjectActionRequest, dialect: Dialect, object: &str) -> String {
+    dialect.quote_qualified(request.namespace.as_deref(), object)
+}
+
+/// Build a `CREATE TABLE` statement from an introspected schema. Intended as
+/// readable, copy-pasteable DDL rather than a byte-exact dump.
+pub fn create_table(schema: &ObjectSchema, dialect: Dialect) -> String {
+    let mut lines: Vec<String> = schema
+        .columns
+        .iter()
+        .map(|column| {
+            let definition = ColumnDefinition {
+                name: column.name.clone(),
+                data_type: column.data_type.clone(),
+                nullable: column.nullable,
+                default_value: column.default_value.clone(),
+                is_primary_key: false,
+                is_auto_increment: column.is_auto_increment,
+                comment: column.comment.clone(),
+                after: None,
+            };
+            format!("  {}", column_definition(&definition, dialect))
+        })
+        .collect();
+
+    let primary: Vec<String> = schema
+        .columns
+        .iter()
+        .filter(|c| c.is_primary_key)
+        .map(|c| dialect.quote(&c.name))
+        .collect();
+    if !primary.is_empty() {
+        lines.push(format!("  PRIMARY KEY ({})", primary.join(", ")));
+    }
+
+    for index in schema.indexes.iter().filter(|i| !i.primary) {
+        let columns = index
+            .columns
+            .iter()
+            .map(|c| dialect.quote(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let keyword = if index.unique { "UNIQUE KEY" } else { "KEY" };
+        lines.push(format!("  {keyword} {} ({columns})", dialect.quote(&index.name)));
+    }
+
+    for fk in &schema.foreign_keys {
+        let columns = fk
+            .columns
+            .iter()
+            .map(|c| dialect.quote(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let referenced = fk
+            .referenced_columns
+            .iter()
+            .map(|c| dialect.quote(c))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!(
+            "  CONSTRAINT {} FOREIGN KEY ({columns}) REFERENCES {} ({referenced})",
+            dialect.quote(&fk.name),
+            dialect.quote(&fk.referenced_table)
+        ));
+    }
+
+    let mut sql = format!(
+        "CREATE TABLE {} (\n{}\n)",
+        dialect.quote(&schema.name),
+        lines.join(",\n")
+    );
+    if dialect == Dialect::MySql {
+        sql.push_str(" ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+    }
+    sql.push(';');
+    sql
+}
+
+/// Render a single column definition, shared by CREATE and ADD/ALTER paths.
+pub fn column_definition(column: &ColumnDefinition, dialect: Dialect) -> String {
+    let mut sql = format!("{} {}", dialect.quote(&column.name), column.data_type.trim());
+    if column.is_auto_increment {
+        match dialect {
+            Dialect::MySql => sql.push_str(" AUTO_INCREMENT"),
+            Dialect::Postgres | Dialect::Ansi => {
+                sql.push_str(" GENERATED BY DEFAULT AS IDENTITY")
+            }
+        }
+    }
+    sql.push_str(if column.nullable { " NULL" } else { " NOT NULL" });
+    if let Some(default) = column.default_value.as_deref().filter(|d| !d.trim().is_empty()) {
+        // The default is a raw SQL expression (`0`, `CURRENT_TIMESTAMP`, `'x'`).
+        sql.push_str(&format!(" DEFAULT {}", default.trim()));
+    }
+    if column.is_primary_key {
+        sql.push_str(" PRIMARY KEY");
+    }
+    if dialect == Dialect::MySql {
+        if let Some(comment) = column.comment.as_deref().filter(|c| !c.is_empty()) {
+            sql.push_str(&format!(" COMMENT {}", dialect.string_literal(comment)));
+        }
+    }
+    if let Some(after) = column.after.as_deref().filter(|a| !a.is_empty()) {
+        sql.push_str(&format!(" AFTER {}", dialect.quote(after)));
+    }
+    sql
+}
+
+fn default_index_name(object: &str, columns: &[String]) -> String {
+    let mut name = format!("idx_{object}_{}", columns.join("_"));
+    name.retain(|c| c.is_ascii_alphanumeric() || c == '_');
+    if name.len() > 60 {
+        name.truncate(60);
+    }
+    name
+}
+
+fn index_sql(request: &ObjectActionRequest, dialect: Dialect) -> Result<String> {
+    let index: &IndexDefinition = request
+        .index
+        .as_ref()
+        .ok_or_else(|| DriverError::Config("index definition is required".into()))?;
+    if index.columns.is_empty() {
+        return Err(DriverError::Config("an index needs at least one column".into()));
+    }
+
+    let table = qualified(request, dialect, &request.object);
+    let name = index
+        .name
+        .clone()
+        .filter(|n| !n.trim().is_empty())
+        .unwrap_or_else(|| default_index_name(&request.object, &index.columns));
+
+    let columns = index
+        .columns
+        .iter()
+        .zip(0..)
+        .map(|(column, position)| {
+            let mut sql = dialect.quote(column);
+            if dialect == Dialect::MySql {
+                if let Some(length) = index.prefix_lengths.get(position).filter(|l| **l > 0) {
+                    sql.push_str(&format!("({length})"));
+                }
+            }
+            sql
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    match dialect {
+        Dialect::MySql => {
+            let keyword = match index.kind {
+                IndexKind::FullText => "FULLTEXT INDEX",
+                IndexKind::Hash => "INDEX",
+                IndexKind::BTree if index.unique => "UNIQUE INDEX",
+                IndexKind::BTree => "INDEX",
+            };
+            let using = if index.kind == IndexKind::Hash {
+                " USING HASH"
+            } else {
+                ""
+            };
+            Ok(format!(
+                "CREATE {keyword} {} ON {table} ({columns}){using};",
+                dialect.quote(&name)
+            ))
+        }
+        Dialect::Postgres | Dialect::Ansi => {
+            if index.kind == IndexKind::FullText {
+                return Err(DriverError::Unsupported(
+                    "PostgreSQL full-text indexes need an expression; create one in SQL".into(),
+                ));
+            }
+            let unique = if index.unique { "UNIQUE " } else { "" };
+            let using = if index.kind == IndexKind::Hash {
+                " USING hash"
+            } else {
+                ""
+            };
+            Ok(format!(
+                "CREATE {unique}INDEX {} ON {table}{using} ({columns});",
+                dialect.quote_qualified(request.namespace.as_deref(), &name)
+            ))
+        }
+    }
+}
+
+/// Turn an [`ObjectActionRequest`] into the SQL the driver should run.
+pub fn action_sql(request: &ObjectActionRequest, dialect: Dialect) -> Result<String> {
+    let table = qualified(request, dialect, &request.object);
+    let kind = request.object_kind.unwrap_or(ObjectKind::Table);
+
+    let sql = match request.action {
+        ObjectAction::RenameObject => {
+            let new_name = request
+                .new_name
+                .as_deref()
+                .filter(|n| !n.trim().is_empty())
+                .ok_or_else(|| DriverError::Config("a new name is required".into()))?;
+            match dialect {
+                Dialect::MySql => format!(
+                    "RENAME TABLE {table} TO {};",
+                    dialect.quote_qualified(request.namespace.as_deref(), new_name)
+                ),
+                _ => {
+                    let keyword = if kind == ObjectKind::View { "VIEW" } else { "TABLE" };
+                    format!("ALTER {keyword} {table} RENAME TO {};", dialect.quote(new_name))
+                }
+            }
+        }
+        ObjectAction::DropObject => {
+            let keyword = match kind {
+                ObjectKind::View => "VIEW",
+                ObjectKind::MaterializedView => "MATERIALIZED VIEW",
+                _ => "TABLE",
+            };
+            let if_exists = if request.if_exists.unwrap_or(true) {
+                " IF EXISTS"
+            } else {
+                ""
+            };
+            let cascade = if dialect != Dialect::MySql && request.cascade.unwrap_or(false) {
+                " CASCADE"
+            } else {
+                ""
+            };
+            format!("DROP {keyword}{if_exists} {table}{cascade};")
+        }
+        ObjectAction::Truncate => {
+            let cascade = if dialect != Dialect::MySql && request.cascade.unwrap_or(false) {
+                " CASCADE"
+            } else {
+                ""
+            };
+            format!("TRUNCATE TABLE {table}{cascade};")
+        }
+        ObjectAction::DuplicateObject => {
+            let new_name = request
+                .new_name
+                .as_deref()
+                .filter(|n| !n.trim().is_empty())
+                .ok_or_else(|| DriverError::Config("a new name is required".into()))?;
+            let target = dialect.quote_qualified(request.namespace.as_deref(), new_name);
+            if request.with_data.unwrap_or(false) {
+                match dialect {
+                    Dialect::MySql => format!("CREATE TABLE {target} AS SELECT * FROM {table};"),
+                    _ => format!("CREATE TABLE {target} AS TABLE {table};"),
+                }
+            } else {
+                match dialect {
+                    Dialect::MySql => format!("CREATE TABLE {target} LIKE {table};"),
+                    _ => format!("CREATE TABLE {target} (LIKE {table} INCLUDING ALL);"),
+                }
+            }
+        }
+        ObjectAction::Maintenance => {
+            let kind = request
+                .maintenance
+                .ok_or_else(|| DriverError::Config("a maintenance kind is required".into()))?;
+            match (dialect, kind) {
+                (Dialect::MySql, MaintenanceKind::Optimize) => format!("OPTIMIZE TABLE {table};"),
+                (Dialect::MySql, MaintenanceKind::Analyze) => format!("ANALYZE TABLE {table};"),
+                (Dialect::MySql, MaintenanceKind::Vacuum) => {
+                    return Err(DriverError::Unsupported("MySQL has no VACUUM".into()))
+                }
+                (_, MaintenanceKind::Vacuum) => format!("VACUUM {table};"),
+                (_, MaintenanceKind::Analyze) => format!("ANALYZE {table};"),
+                (_, MaintenanceKind::Optimize) => {
+                    return Err(DriverError::Unsupported(
+                        "this engine has no OPTIMIZE TABLE".into(),
+                    ))
+                }
+            }
+        }
+        ObjectAction::Reindex => match dialect {
+            Dialect::MySql => {
+                return Err(DriverError::Unsupported("MySQL has no REINDEX".into()))
+            }
+            _ => format!("REINDEX TABLE {table};"),
+        },
+        ObjectAction::CreateIndex => index_sql(request, dialect)?,
+        ObjectAction::DropIndex => {
+            let name = request
+                .index_name
+                .as_deref()
+                .filter(|n| !n.trim().is_empty())
+                .ok_or_else(|| DriverError::Config("an index name is required".into()))?;
+            match dialect {
+                Dialect::MySql => format!("DROP INDEX {} ON {table};", dialect.quote(name)),
+                _ => {
+                    let cascade = if request.cascade.unwrap_or(false) {
+                        " CASCADE"
+                    } else {
+                        ""
+                    };
+                    format!(
+                        "DROP INDEX IF EXISTS {}{cascade};",
+                        dialect.quote_qualified(request.namespace.as_deref(), name)
+                    )
+                }
+            }
+        }
+        ObjectAction::AddColumn => {
+            let column = request
+                .column
+                .as_ref()
+                .ok_or_else(|| DriverError::Config("a column definition is required".into()))?;
+            format!(
+                "ALTER TABLE {table} ADD COLUMN {};",
+                column_definition(column, dialect)
+            )
+        }
+        ObjectAction::AlterColumn => {
+            let column = request
+                .column
+                .as_ref()
+                .ok_or_else(|| DriverError::Config("a column definition is required".into()))?;
+            match dialect {
+                Dialect::MySql => {
+                    // CHANGE COLUMN takes the old name plus the full new definition.
+                    let mut definition = column_definition(column, dialect);
+                    // `AFTER` belongs outside the definition.
+                    if let Some(after) = column
+                        .after
+                        .as_deref()
+                        .filter(|a| !a.is_empty())
+                    {
+                        definition = definition.replace(
+                            &format!(" AFTER {}", dialect.quote(after)),
+                            "",
+                        );
+                        return Ok(format!(
+                            "ALTER TABLE {table} CHANGE COLUMN {} {definition} AFTER {};",
+                            dialect.quote(&column.name),
+                            dialect.quote(after)
+                        ));
+                    }
+                    format!(
+                        "ALTER TABLE {table} CHANGE COLUMN {} {definition};",
+                        dialect.quote(&column.name)
+                    )
+                }
+                _ => {
+                    let mut statements = Vec::new();
+                    if let Some(rename_to) = request
+                        .rename_to
+                        .as_deref()
+                        .filter(|n| !n.trim().is_empty() && *n != column.name.as_str())
+                    {
+                        statements.push(format!(
+                            "ALTER TABLE {table} RENAME COLUMN {} TO {}",
+                            dialect.quote(&column.name),
+                            dialect.quote(rename_to)
+                        ));
+                    }
+                    statements.push(format!(
+                        "ALTER TABLE {table} ALTER COLUMN {} TYPE {}",
+                        dialect.quote(&column.name),
+                        column.data_type.trim()
+                    ));
+                    statements.push(format!(
+                        "ALTER TABLE {table} ALTER COLUMN {} {}",
+                        dialect.quote(&column.name),
+                        if column.nullable {
+                            "DROP NOT NULL"
+                        } else {
+                            "SET NOT NULL"
+                        }
+                    ));
+                    match column.default_value.as_deref().filter(|d| !d.trim().is_empty()) {
+                        Some(default) => statements.push(format!(
+                            "ALTER TABLE {table} ALTER COLUMN {} SET DEFAULT {}",
+                            dialect.quote(&column.name),
+                            default.trim()
+                        )),
+                        None => statements.push(format!(
+                            "ALTER TABLE {table} ALTER COLUMN {} DROP DEFAULT",
+                            dialect.quote(&column.name)
+                        )),
+                    }
+                    format!("{};", statements.join(";\n"))
+                }
+            }
+        }
+        ObjectAction::DropColumn => {
+            let column = request
+                .column
+                .as_ref()
+                .map(|c| c.name.clone())
+                .or_else(|| request.new_name.clone())
+                .filter(|n| !n.trim().is_empty())
+                .ok_or_else(|| DriverError::Config("a column name is required".into()))?;
+            let cascade = if dialect != Dialect::MySql && request.cascade.unwrap_or(false) {
+                " CASCADE"
+            } else {
+                ""
+            };
+            format!(
+                "ALTER TABLE {table} DROP COLUMN {}{cascade};",
+                dialect.quote(&column)
+            )
+        }
+        other => {
+            return Err(DriverError::Unsupported(format!(
+                "{other:?} is not a write action"
+            )))
+        }
+    };
+
+    Ok(sql)
+}
+
+/// Build a `CREATE TABLE` from a wizard definition. Validation happens here (not
+/// only in the UI) so a malformed request can never reach the server.
+pub fn create_table_from_columns(
+    request: &CreateTableRequest,
+    dialect: Dialect,
+) -> Result<String> {
+    let table = request.table.trim();
+    if table.is_empty() {
+        return Err(DriverError::Config("a table name is required".into()));
+    }
+    if request.columns.is_empty() {
+        return Err(DriverError::Config(
+            "a table needs at least one column".into(),
+        ));
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    for column in &request.columns {
+        let name = column.name.trim();
+        if name.is_empty() {
+            return Err(DriverError::Config("every column needs a name".into()));
+        }
+        if !seen.insert(name.to_lowercase()) {
+            return Err(DriverError::Config(format!("duplicate column name: {name}")));
+        }
+    }
+
+    let auto_increment: Vec<&ColumnDefinition> = request
+        .columns
+        .iter()
+        .filter(|column| column.is_auto_increment)
+        .collect();
+    if auto_increment.len() > 1 {
+        return Err(DriverError::Config(
+            "only one column can be auto-increment".into(),
+        ));
+    }
+    if let Some(column) = auto_increment.first() {
+        if !column.is_primary_key {
+            return Err(DriverError::Config(
+                "an auto-increment column must be a primary key".into(),
+            ));
+        }
+    }
+
+    let composite = request.columns.iter().filter(|c| c.is_primary_key).count() > 1;
+    let mut lines: Vec<String> = request
+        .columns
+        .iter()
+        .map(|column| {
+            // With a composite key the constraint is emitted once below, so the
+            // inline `PRIMARY KEY` on each column is suppressed.
+            let mut column = column.clone();
+            if composite {
+                column.is_primary_key = false;
+            }
+            format!("  {}", column_definition(&column, dialect))
+        })
+        .collect();
+
+    if composite {
+        let primary: Vec<String> = request
+            .columns
+            .iter()
+            .filter(|c| c.is_primary_key)
+            .map(|c| dialect.quote(c.name.trim()))
+            .collect();
+        lines.push(format!("  PRIMARY KEY ({})", primary.join(", ")));
+    }
+
+    let qualified = dialect.quote_qualified(request.namespace.as_deref(), table);
+    let if_not_exists = if request.if_not_exists.unwrap_or(false) {
+        " IF NOT EXISTS"
+    } else {
+        ""
+    };
+    let mut sql = format!(
+        "CREATE TABLE{if_not_exists} {qualified} (\n{}\n)",
+        lines.join(",\n")
+    );
+    if dialect == Dialect::MySql {
+        sql.push_str(" ENGINE=InnoDB DEFAULT CHARSET=utf8mb4");
+        if let Some(comment) = request.comment.as_deref().filter(|c| !c.trim().is_empty()) {
+            sql.push_str(&format!(" COMMENT={}", dialect.string_literal(comment)));
+        }
+    }
+    sql.push(';');
+    Ok(sql)
+}
+
+// ---------------------------------------------------------------------------
+// Row-level mutations (grid editing)
+// ---------------------------------------------------------------------------
+
+/// Render a single JSON value as a SQL literal for the dialect. Null becomes
+/// `NULL`, numbers and booleans go through unquoted, and everything else is
+/// quoted as a string so user data can never break out of the statement.
+pub fn row_value(value: &Value, dialect: Dialect) -> String {
+    match value {
+        Value::Null => "NULL".to_string(),
+        Value::Bool(true) => "TRUE".to_string(),
+        Value::Bool(false) => "FALSE".to_string(),
+        Value::Number(number) => number.to_string(),
+        Value::String(text) => dialect.string_literal(text),
+        other => dialect.string_literal(&other.to_string()),
+    }
+}
+
+fn row_table(request: &RowChangeRequest, dialect: Dialect) -> String {
+    dialect.quote_qualified(request.namespace.as_deref(), &request.object)
+}
+
+/// `col = value AND ...` used to target exactly one row. An empty key is
+/// refused so a malformed request can never update or delete a whole table.
+fn row_where(key: &[RowValue], dialect: Dialect) -> Result<String> {
+    if key.is_empty() {
+        return Err(DriverError::Config(
+            "a row key is required to target a single row".into(),
+        ));
+    }
+    Ok(key
+        .iter()
+        .map(|entry| {
+            format!(
+                "{} = {}",
+                dialect.quote(&entry.column),
+                row_value(&entry.value, dialect)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" AND "))
+}
+
+/// `INSERT INTO t (cols) VALUES (...)` for one new row.
+pub fn insert_row_sql(request: &RowChangeRequest, dialect: Dialect) -> Result<String> {
+    if request.values.is_empty() {
+        return Err(DriverError::Config(
+            "an insert needs at least one column".into(),
+        ));
+    }
+    let columns = request
+        .values
+        .iter()
+        .map(|entry| dialect.quote(&entry.column))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let values = request
+        .values
+        .iter()
+        .map(|entry| row_value(&entry.value, dialect))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "INSERT INTO {} ({columns}) VALUES ({values});",
+        row_table(request, dialect)
+    ))
+}
+
+/// `UPDATE t SET ... WHERE key` for one existing row.
+pub fn update_row_sql(request: &RowChangeRequest, dialect: Dialect) -> Result<String> {
+    if request.values.is_empty() {
+        return Err(DriverError::Config("no columns to update".into()));
+    }
+    let where_sql = row_where(&request.key, dialect)?;
+    let sets = request
+        .values
+        .iter()
+        .map(|entry| {
+            format!(
+                "{} = {}",
+                dialect.quote(&entry.column),
+                row_value(&entry.value, dialect)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(format!(
+        "UPDATE {} SET {sets} WHERE {where_sql};",
+        row_table(request, dialect)
+    ))
+}
+
+/// `DELETE FROM t WHERE key` for one existing row.
+pub fn delete_row_sql(request: &RowChangeRequest, dialect: Dialect) -> Result<String> {
+    let where_sql = row_where(&request.key, dialect)?;
+    Ok(format!(
+        "DELETE FROM {} WHERE {where_sql};",
+        row_table(request, dialect)
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{ColumnSchema, ForeignKeySchema, IndexSchema, RowChangeKind};
+
+    fn request(action: ObjectAction) -> ObjectActionRequest {
+        ObjectActionRequest {
+            connection_id: "c".into(),
+            database: "shop".into(),
+            namespace: Some("public".into()),
+            object: "orders".into(),
+            object_kind: Some(ObjectKind::Table),
+            action,
+            new_name: None,
+            with_data: None,
+            if_exists: None,
+            cascade: None,
+            maintenance: None,
+            index: None,
+            index_name: None,
+            column: None,
+            rename_to: None,
+        }
+    }
+
+    #[test]
+    fn quotes_identifiers_per_dialect() {
+        assert_eq!(Dialect::MySql.quote("a`b"), "`a``b`");
+        assert_eq!(Dialect::Postgres.quote("a\"b"), "\"a\"\"b\"");
+        assert_eq!(Dialect::MySql.string_literal("it's"), "'it''s'");
+    }
+
+    #[test]
+    fn drop_table_is_dialect_aware() {
+        let mut req = request(ObjectAction::DropObject);
+        req.if_exists = Some(true);
+        req.cascade = Some(true);
+        assert_eq!(
+            action_sql(&req, Dialect::MySql).unwrap(),
+            "DROP TABLE IF EXISTS `public`.`orders`;"
+        );
+        assert_eq!(
+            action_sql(&req, Dialect::Postgres).unwrap(),
+            "DROP TABLE IF EXISTS \"public\".\"orders\" CASCADE;"
+        );
+    }
+
+    #[test]
+    fn create_index_defaults_name_and_handles_unique() {
+        let mut req = request(ObjectAction::CreateIndex);
+        req.index = Some(IndexDefinition {
+            name: None,
+            columns: vec!["customer_id".into(), "status".into()],
+            unique: true,
+            kind: IndexKind::BTree,
+            prefix_lengths: vec![],
+        });
+        let mysql = action_sql(&req, Dialect::MySql).unwrap();
+        assert!(mysql.contains("CREATE UNIQUE INDEX `idx_orders_customer_id_status` ON `public`.`orders` (`customer_id`, `status`);"));
+
+        let pg = action_sql(&req, Dialect::Postgres).unwrap();
+        assert!(pg.contains("CREATE UNIQUE INDEX \"public\".\"idx_orders_customer_id_status\" ON \"public\".\"orders\" (\"customer_id\", \"status\");"));
+    }
+
+    #[test]
+    fn truncate_and_maintenance_differ() {
+        let req = request(ObjectAction::Truncate);
+        assert_eq!(
+            action_sql(&req, Dialect::MySql).unwrap(),
+            "TRUNCATE TABLE `public`.`orders`;"
+        );
+
+        let mut vacuum = request(ObjectAction::Maintenance);
+        vacuum.maintenance = Some(MaintenanceKind::Vacuum);
+        assert!(action_sql(&vacuum, Dialect::MySql).is_err());
+        assert_eq!(
+            action_sql(&vacuum, Dialect::Postgres).unwrap(),
+            "VACUUM \"public\".\"orders\";"
+        );
+    }
+
+    #[test]
+    fn add_column_renders_definition() {
+        let mut req = request(ObjectAction::AddColumn);
+        req.column = Some(ColumnDefinition {
+            name: "note".into(),
+            data_type: "text".into(),
+            nullable: true,
+            default_value: Some("'x'".into()),
+            is_primary_key: false,
+            is_auto_increment: false,
+            comment: Some("it's a note".into()),
+            after: Some("status".into()),
+        });
+        let sql = action_sql(&req, Dialect::MySql).unwrap();
+        assert!(sql.contains("ADD COLUMN `note` text NULL DEFAULT 'x' COMMENT 'it''s a note' AFTER `status`;"));
+    }
+
+    #[test]
+    fn create_table_includes_keys() {
+        let schema = ObjectSchema {
+            name: "orders".into(),
+            kind: ObjectKind::Table,
+            columns: vec![
+                ColumnSchema {
+                    name: "id".into(),
+                    data_type: "bigint".into(),
+                    nullable: false,
+                    default_value: None,
+                    is_primary_key: true,
+                    is_auto_increment: true,
+                    comment: None,
+                    ordinal: 1,
+                },
+                ColumnSchema {
+                    name: "customer_id".into(),
+                    data_type: "bigint".into(),
+                    nullable: false,
+                    default_value: None,
+                    is_primary_key: false,
+                    is_auto_increment: false,
+                    comment: None,
+                    ordinal: 2,
+                },
+            ],
+            indexes: vec![IndexSchema {
+                name: "idx_customer".into(),
+                columns: vec!["customer_id".into()],
+                unique: false,
+                primary: false,
+            }],
+            foreign_keys: vec![ForeignKeySchema {
+                name: "fk_customer".into(),
+                columns: vec!["customer_id".into()],
+                referenced_table: "customers".into(),
+                referenced_columns: vec!["id".into()],
+            }],
+        };
+        let sql = create_table(&schema, Dialect::MySql);
+        assert!(sql.contains("PRIMARY KEY (`id`)"));
+        assert!(sql.contains("KEY `idx_customer` (`customer_id`)"));
+        assert!(sql.contains("CONSTRAINT `fk_customer` FOREIGN KEY (`customer_id`) REFERENCES `customers` (`id`)"));
+        assert!(sql.contains("ENGINE=InnoDB"));
+    }
+
+    fn column(name: &str, data_type: &str) -> ColumnDefinition {
+        ColumnDefinition {
+            name: name.into(),
+            data_type: data_type.into(),
+            nullable: false,
+            default_value: None,
+            is_primary_key: false,
+            is_auto_increment: false,
+            comment: None,
+            after: None,
+        }
+    }
+
+    fn create_request(columns: Vec<ColumnDefinition>) -> CreateTableRequest {
+        CreateTableRequest {
+            connection_id: "c".into(),
+            database: "shop".into(),
+            namespace: None,
+            table: "orders".into(),
+            columns,
+            if_not_exists: None,
+            comment: None,
+        }
+    }
+
+    #[test]
+    fn create_table_from_columns_handles_single_key() {
+        let mut id = column("id", "bigint unsigned");
+        id.is_primary_key = true;
+        id.is_auto_increment = true;
+        let sql = create_table_from_columns(
+            &create_request(vec![id, column("note", "text")]),
+            Dialect::MySql,
+        )
+        .unwrap();
+        assert!(sql.starts_with("CREATE TABLE `orders` ("));
+        assert!(sql.contains("`id` bigint unsigned AUTO_INCREMENT NOT NULL PRIMARY KEY"));
+        assert!(sql.contains("ENGINE=InnoDB"));
+        assert!(!sql.contains("PRIMARY KEY ("));
+    }
+
+    #[test]
+    fn create_table_from_columns_emits_composite_key_once() {
+        let mut a = column("a", "int");
+        a.is_primary_key = true;
+        let mut b = column("b", "int");
+        b.is_primary_key = true;
+        let sql = create_table_from_columns(
+            &create_request(vec![a, b]),
+            Dialect::Postgres,
+        )
+        .unwrap();
+        assert!(sql.contains("PRIMARY KEY (\"a\", \"b\")"));
+        assert_eq!(sql.matches("PRIMARY KEY").count(), 1);
+    }
+
+    #[test]
+    fn create_table_from_columns_validates() {
+        assert!(create_table_from_columns(&create_request(vec![]), Dialect::MySql).is_err());
+
+        let mut a = column("a", "int");
+        let mut a2 = column("A", "int");
+        assert!(create_table_from_columns(&create_request(vec![a.clone(), a2.clone()]), Dialect::MySql).is_err());
+
+        // two auto-increment columns
+        a.is_auto_increment = true;
+        a.is_primary_key = true;
+        a2.is_auto_increment = true;
+        a2.is_primary_key = true;
+        assert!(create_table_from_columns(&create_request(vec![a, a2]), Dialect::MySql).is_err());
+
+        // auto-increment without primary key
+        let mut c = column("c", "int");
+        c.is_auto_increment = true;
+        assert!(create_table_from_columns(&create_request(vec![c]), Dialect::MySql).is_err());
+    }
+
+    fn row_request(kind: RowChangeKind) -> RowChangeRequest {
+        RowChangeRequest {
+            connection_id: "c".into(),
+            database: "shop".into(),
+            namespace: Some("public".into()),
+            object: "orders".into(),
+            kind,
+            key: vec![RowValue {
+                column: "id".into(),
+                value: serde_json::json!(7),
+            }],
+            values: vec![RowValue {
+                column: "status".into(),
+                value: serde_json::json!("paid"),
+            }],
+        }
+    }
+
+    #[test]
+    fn row_values_quote_by_type_and_dialect() {
+        assert_eq!(row_value(&Value::Null, Dialect::MySql), "NULL");
+        assert_eq!(row_value(&Value::Bool(true), Dialect::MySql), "TRUE");
+        assert_eq!(row_value(&Value::Bool(false), Dialect::Postgres), "FALSE");
+        assert_eq!(row_value(&serde_json::json!(42), Dialect::MySql), "42");
+        assert_eq!(
+            row_value(&serde_json::json!("it's"), Dialect::MySql),
+            "'it''s'"
+        );
+        assert_eq!(row_value(&serde_json::json!("x"), Dialect::Postgres), "'x'");
+    }
+
+    #[test]
+    fn update_requires_key_and_quotes_values() {
+        let req = row_request(RowChangeKind::Update);
+        assert_eq!(
+            update_row_sql(&req, Dialect::MySql).unwrap(),
+            "UPDATE `public`.`orders` SET `status` = 'paid' WHERE `id` = 7;"
+        );
+        let mut no_key = req;
+        no_key.key.clear();
+        assert!(update_row_sql(&no_key, Dialect::MySql).is_err());
+    }
+
+    #[test]
+    fn delete_refuses_empty_key() {
+        let mut req = row_request(RowChangeKind::Delete);
+        assert_eq!(
+            delete_row_sql(&req, Dialect::Postgres).unwrap(),
+            "DELETE FROM \"public\".\"orders\" WHERE \"id\" = 7;"
+        );
+        req.key.clear();
+        assert!(delete_row_sql(&req, Dialect::Postgres).is_err());
+    }
+
+    #[test]
+    fn insert_requires_columns() {
+        let req = row_request(RowChangeKind::Insert);
+        assert_eq!(
+            insert_row_sql(&req, Dialect::MySql).unwrap(),
+            "INSERT INTO `public`.`orders` (`status`) VALUES ('paid');"
+        );
+        let mut empty = req;
+        empty.values.clear();
+        assert!(insert_row_sql(&empty, Dialect::MySql).is_err());
+    }
+}

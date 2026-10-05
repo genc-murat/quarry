@@ -1,0 +1,340 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import CodeMirror from "@uiw/react-codemirror";
+import { MySQL, PostgreSQL, StandardSQL, sql, type SQLNamespace } from "@codemirror/lang-sql";
+import { indentUnit } from "@codemirror/language";
+import { EditorState } from "@codemirror/state";
+import { oneDark } from "@codemirror/theme-one-dark";
+import { EditorView } from "@codemirror/view";
+import { Bookmark, ListTree, Play, Square, Terminal } from "lucide-react";
+
+import { ObjectInspector } from "@/components/objects/ObjectInspector";
+import { PlanPanel } from "@/components/query/PlanPanel";
+import { ResultsGrid } from "@/components/query/ResultsGrid";
+import { Button } from "@/components/ui/button";
+import { Dialog } from "@/components/ui/dialog";
+import { Input, Label, Select } from "@/components/ui/input";
+import { useThemeStore, resolveMode } from "@/stores/theme";
+import { useWorkspace } from "@/stores/workspace";
+
+/** Upper bound on tables fed to the autocompleter so huge schemas stay snappy. */
+const MAX_COMPLETION_TABLES = 400;
+
+export function QueryWorkspace() {
+  const tabs = useWorkspace((s) => s.tabs);
+  const activeTabId = useWorkspace((s) => s.activeTabId);
+  const updateTab = useWorkspace((s) => s.updateTab);
+  const runTab = useWorkspace((s) => s.runTab);
+  const explainTab = useWorkspace((s) => s.explainTab);
+  const cancelTab = useWorkspace((s) => s.cancelTab);
+  const saveSnippet = useWorkspace((s) => s.saveSnippet);
+  const saveRowChanges = useWorkspace((s) => s.saveRowChanges);
+  const pageObjectData = useWorkspace((s) => s.pageObjectData);
+  const sessions = useWorkspace((s) => s.sessions);
+  const databasesBySession = useWorkspace((s) => s.databasesBySession);
+  const mode = useThemeStore((s) => s.mode);
+  const editor = useWorkspace((s) => s.settings.editor);
+  const columnsCache = useWorkspace((s) => s.columnsCache);
+  const loadColumns = useWorkspace((s) => s.loadColumns);
+
+  const [editorRatio, setEditorRatio] = useState(46);
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [snippetName, setSnippetName] = useState("");
+  const dragging = useRef(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  const tab = tabs.find((t) => t.id === activeTabId) ?? null;
+  const session = sessions.find((s) => s.id === tab?.sessionId) ?? null;
+  const databases = session ? (databasesBySession[session.id] ?? []) : [];
+  const dark = resolveMode(mode) === "dark";
+  const sessionId = tab?.sessionId ?? null;
+  // Fall back to the database the session is connected to so completion works
+  // before the user explicitly picks one.
+  const database = tab?.database ?? session?.server.currentDatabase ?? null;
+
+  // Fetch the schema once per session+database so the editor can complete
+  // table and column names (not just keywords).
+  useEffect(() => {
+    if (sessionId && database) void loadColumns(sessionId, database);
+  }, [sessionId, database, loadColumns]);
+
+  const schema = useMemo<SQLNamespace | undefined>(() => {
+    if (!sessionId || !database) return undefined;
+    const entries = columnsCache[`${sessionId}||${database}`];
+    if (!entries || entries.length === 0) return undefined;
+
+    const root: Record<string, unknown> = {};
+    const qualified: Record<string, Record<string, unknown>> = {};
+
+    for (const entry of entries.slice(0, MAX_COMPLETION_TABLES)) {
+      // NOTE: a namespace leaf must be an *array* of completions; a bare
+      // completion object is read as a nested namespace and recurses forever.
+      const table = {
+        self: { label: entry.table, type: "class" },
+        children: entry.columns.map((column) => ({
+          label: column.name,
+          type: "property",
+          detail: column.dataType ?? undefined,
+        })),
+      };
+      // Flat entry so `orders.` and `FROM ord…` work.
+      root[entry.table] = table;
+      // Grouped entry so `shop.orders.` works too.
+      if (entry.schema) {
+        (qualified[entry.schema] ??= {})[entry.table] = table;
+      }
+    }
+
+    for (const [name, children] of Object.entries(qualified)) {
+      // Never shadow a table that happens to share the schema's name.
+      root[name] ??= { self: { label: name, type: "namespace" }, children };
+    }
+
+    return root as SQLNamespace;
+  }, [columnsCache, sessionId, database]);
+
+  const dialect = useMemo(() => {
+    switch (session?.driver) {
+      case "mysql":
+        return MySQL;
+      case "postgres":
+        return PostgreSQL;
+      default:
+        return StandardSQL;
+    }
+  }, [session?.driver]);
+
+  // Editor settings are extensions rather than props, so they are rebuilt when
+  // any of them changes.
+  const extensions = useMemo(
+    () => [
+      sql({ dialect, schema }),
+      ...(editor.wordWrap ? [EditorView.lineWrapping] : []),
+      EditorState.tabSize.of(Number(editor.tabSize)),
+      indentUnit.of(" ".repeat(Number(editor.tabSize))),
+    ],
+    [dialect, schema, editor.wordWrap, editor.tabSize],
+  );
+
+  function startDrag() {
+    dragging.current = true;
+    const onMove = (event: MouseEvent) => {
+      if (!dragging.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const ratio = ((event.clientY - rect.top) / rect.height) * 100;
+      setEditorRatio(Math.min(80, Math.max(20, ratio)));
+    };
+    const onUp = () => {
+      dragging.current = false;
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
+  if (!tab) {
+    return (
+      <div className="flex h-full items-center justify-center text-xs text-muted-foreground">
+        <Terminal className="mr-2 h-4 w-4" /> No query open
+      </div>
+    );
+  }
+
+  // Object tabs reuse this workspace slot to render the table inspector.
+  if (tab.kind === "object" && tab.objectRef) {
+    return <ObjectInspector objectRef={tab.objectRef} />;
+  }
+
+  function handleSaveSnippet() {
+    const name = snippetName.trim();
+    if (!name || !tab) return;
+    void saveSnippet({
+      name,
+      sql: tab.sql,
+      database: tab.database,
+      driver: session?.driver ?? null,
+    });
+    setSnippetName("");
+    setSaveOpen(false);
+  }
+
+  return (
+    <div ref={containerRef} className="flex h-full min-h-0 flex-col">
+      <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border bg-surface/60 px-3 py-2">
+        {tab.running ? (
+          <Button
+            size="sm"
+            variant="destructive"
+            onClick={() => cancelTab(tab.id)}
+            title="Stop (⌘/Ctrl + .)"
+          >
+            <Square className="h-3.5 w-3.5" />
+            Stop
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            onClick={() => runTab(tab.id)}
+            disabled={!session}
+            title="Run (⌘/Ctrl + Enter)"
+          >
+            <Play className="h-3.5 w-3.5" />
+            Run
+          </Button>
+        )}
+
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => explainTab(tab.id)}
+          disabled={!session || tab.running || tab.explaining}
+          title="Explain (⌘/Ctrl + Shift + Enter)"
+        >
+          <ListTree className="h-3.5 w-3.5" />
+          Explain
+        </Button>
+
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={() => setSaveOpen(true)}
+          disabled={!tab.sql.trim()}
+          title="Save as snippet"
+        >
+          <Bookmark className="h-3.5 w-3.5" />
+          Save
+        </Button>
+
+        <div className="flex items-center gap-1.5">
+          <span className="text-[11px] text-muted-foreground">Session</span>
+          <Select
+            className="h-7 w-44 text-xs"
+            value={tab.sessionId ?? ""}
+            onChange={(event) => updateTab(tab.id, { sessionId: event.target.value || null })}
+          >
+            <option value="">none</option>
+            {sessions.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name}
+              </option>
+            ))}
+          </Select>
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <span className="text-[11px] text-muted-foreground">Database</span>
+          <Select
+            className="h-7 w-44 text-xs"
+            value={tab.database ?? ""}
+            disabled={databases.length === 0}
+            onChange={(event) => updateTab(tab.id, { database: event.target.value || null })}
+          >
+            <option value="">default</option>
+            {databases.map((database) => (
+              <option key={database.name} value={database.name}>
+                {database.name}
+              </option>
+            ))}
+          </Select>
+        </div>
+
+        {session ? (
+          <span className="ml-auto text-[11px] text-muted-foreground">
+            {session.server.currentUser ?? ""}
+            {session.server.supportsTls ? " · TLS" : ""}
+          </span>
+        ) : null}
+      </div>
+
+      <div
+        onKeyDown={(event) => {
+          if (!(event.metaKey || event.ctrlKey)) return;
+          if (event.key === "." && tab.running) {
+            event.preventDefault();
+            void cancelTab(tab.id);
+            return;
+          }
+          if (event.key === "Enter") {
+            event.preventDefault();
+            if (tab.running) {
+              void cancelTab(tab.id);
+            } else if (event.shiftKey) {
+              void explainTab(tab.id);
+            } else {
+              void runTab(tab.id);
+            }
+          }
+        }}
+        style={{ height: `${editorRatio}%` }}
+        className="min-h-0 shrink-0 overflow-hidden"
+      >
+        <CodeMirror
+          value={tab.sql}
+          height="100%"
+          theme={dark ? oneDark : "light"}
+          extensions={extensions}
+          onChange={(value) => updateTab(tab.id, { sql: value })}
+          basicSetup={{
+            lineNumbers: editor.lineNumbers,
+            highlightActiveLine: editor.highlightActiveLine,
+            foldGutter: editor.foldGutter,
+            autocompletion: editor.autocomplete,
+          }}
+        />
+      </div>
+
+      <div
+        onMouseDown={startDrag}
+        className="h-1 shrink-0 cursor-row-resize bg-border transition-colors hover:bg-primary"
+      />
+
+      <div className="min-h-0 flex-1">
+        {tab.explaining || tab.plan ? (
+          <PlanPanel plan={tab.plan} explaining={tab.explaining} />
+        ) : (
+          <ResultsGrid
+            result={tab.result}
+            error={tab.error}
+            running={tab.running}
+            cancelled={tab.cancelled}
+            editSource={tab.editSource}
+            onSaveChanges={(changes) => saveRowChanges(tab.id, changes)}
+            preview={tab.preview}
+            onPage={(offset) => void pageObjectData(tab.id, offset)}
+          />
+        )}
+      </div>
+
+      <Dialog
+        open={saveOpen}
+        onClose={() => setSaveOpen(false)}
+        title="Save query"
+        description="Reuse this query later from the Saved panel."
+        footer={
+          <>
+            <Button variant="ghost" size="sm" onClick={() => setSaveOpen(false)}>
+              Cancel
+            </Button>
+            <Button size="sm" onClick={handleSaveSnippet} disabled={!snippetName.trim()}>
+              Save
+            </Button>
+          </>
+        }
+      >
+        <Label htmlFor="snippet-name" className="mb-2 block">
+          Name
+        </Label>
+        <Input
+          id="snippet-name"
+          autoFocus
+          value={snippetName}
+          placeholder="e.g. Recent orders"
+          onChange={(event) => setSnippetName(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") handleSaveSnippet();
+          }}
+        />
+      </Dialog>
+    </div>
+  );
+}
