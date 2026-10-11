@@ -1,0 +1,21 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  js:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      # No native build step is involved: the checks are tsc plus Node's own
+      # test runner, so install scripts (tauri CLI, esbuild binary) are skipped
+      # to keep the job quick.
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm test

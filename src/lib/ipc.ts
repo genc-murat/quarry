@@ -32,14 +32,33 @@ export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
+/** One backend call: a command name plus its payload, once the serialisation
+ *  the shell would do has been stripped away. */
+export type IpcTransport = <T>(
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<T>;
+
+const shellTransport: IpcTransport = (command, args) => invoke(command, args);
+
 /** In-browser backend so the UI can be reviewed without the desktop shell.
  *  Inside the packaged app `__TAURI_INTERNALS__` always exists, so this branch
  *  is never taken there. */
-const useMock = !isTauri();
+const defaultTransport: IpcTransport = isTauri() ? shellTransport : mockInvoke;
+
+let transport = defaultTransport;
+
+/**
+ * Send every `ipc.*` call to another backend; null restores the default one.
+ * `src/lib/testBackend.ts` uses this so tests script replies and assert the
+ * commands that were sent, instead of running the shell or the demo fixtures.
+ */
+export function setIpcTransport(next: IpcTransport | null): void {
+  transport = next ?? defaultTransport;
+}
 
 function call<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  if (useMock) return mockInvoke<T>(cmd, args);
-  return invoke<T>(cmd, args);
+  return transport<T>(cmd, args);
 }
 
 /**

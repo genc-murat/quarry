@@ -8,6 +8,7 @@ import { EditorView } from "@codemirror/view";
 import { Bookmark, ListTree, Play, Square, Star, Terminal } from "lucide-react";
 
 import { ObjectInspector } from "@/components/objects/ObjectInspector";
+import { DatabaseSelect } from "@/components/query/DatabaseSelect";
 import { PlanPanel } from "@/components/query/PlanPanel";
 import { ResultsGrid } from "@/components/query/ResultsGrid";
 import { Button } from "@/components/ui/button";
@@ -249,19 +250,13 @@ export function QueryWorkspace() {
 
         <div className="flex items-center gap-1.5">
           <span className="text-[11px] text-muted-foreground">Database</span>
-          <Select
+          <DatabaseSelect
             className="h-7 w-44 text-xs"
+            databases={databases}
             value={tab.database ?? ""}
             disabled={databases.length === 0}
-            onChange={(event) => updateTab(tab.id, { database: event.target.value || null })}
-          >
-            <option value="">default</option>
-            {databases.map((database) => (
-              <option key={database.name} value={database.name}>
-                {database.name}
-              </option>
-            ))}
-          </Select>
+            onChange={(database) => updateTab(tab.id, { database })}
+          />
         </div>
 
         {session ? (
