@@ -78,6 +78,8 @@ pub fn run() {
             commands::cancel_query,
             commands::explain_query,
             commands::object_detail,
+            commands::object_section,
+            commands::object_section_action,
             commands::object_action,
             commands::count_rows,
             commands::apply_row_change,

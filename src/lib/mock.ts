@@ -5,19 +5,22 @@
  * is opened in a plain browser (`npm run dev` without the shell) this module
  * supplies representative data so the UI can be designed and reviewed without
  * a live database. It is never used inside the packaged desktop app.
+ *
+ * Every command is answered from the fixture of the session's engine, so each
+ * engine's surface — connection form, explorer tree, object inspector, editor —
+ * can be walked in the browser. The fixtures themselves live in
+ * `./mockFixtures`; this file only routes commands and keeps the small amount
+ * of state a session needs (settings, saved queries, the editable result set).
  */
 import type {
   ConnectResult,
   ConnectionProfile,
-  DatabaseInfo,
-  DatabaseObject,
+  CreateTableRequest,
   DriverDescriptor,
   NamespaceInfo,
-  ObjectAction,
   ObjectActionRequest,
-  ObjectDetail,
-  ObjectSchema,
-  CreateTableRequest,
+  ObjectSectionActionRequest,
+  ObjectSectionRequest,
   QueryRequest,
   QueryResponse,
   RowChangeRequest,
@@ -25,182 +28,45 @@ import type {
   SessionInfo,
   Snippet,
 } from "./types";
+// The `.ts` extension keeps this module loadable by `node --test` directly,
+// which is how the fixture set is checked (see `mock.test.ts`).
+// Explicit `.ts` like `./mockFixtures.ts`, so `node --test` can load this module.
+import { mongoStatements, redisStatements } from "./mockReplies.ts";
+import {
+  FIXTURES,
+  type EngineFixture,
+  detailOf,
+  fixtureFor,
+  fixtureForDriver,
+  fixtureForProfile,
+} from "./mockFixtures.ts";
 
-/** Actions a relational mock driver advertises for the context menu. */
-const MOCK_ACTIONS: ObjectAction[] = [
-  "inspect",
-  "viewData",
-  "countRows",
-  "copyName",
-  "copyQualifiedName",
-  "copyDdl",
-  "generateDdl",
-  "templateSelect",
-  "templateInsert",
-  "templateUpdate",
-  "templateDelete",
-  "exportData",
-  "renameObject",
-  "duplicateObject",
-  "dropObject",
-  "truncate",
-  "maintenance",
-  "createIndex",
-  "dropIndex",
-  "addColumn",
-  "alterColumn",
-  "dropColumn",
-];
+/**
+ * Artificial latency of every mocked command, in milliseconds. Set both bounds
+ * to 0 to script a sequence of commands without waiting (the tests do), or
+ * raise them to exercise loading and cancellation paths by hand.
+ */
+export const mockLatency = { min: 90, max: 210 };
 
-const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** Long-query simulation: a statement containing `slow` or `sleep` blocks this
+ *  long, so the Stop button and the cancelled state are reachable. */
+export const mockSlowQueryMs = 4000;
 
-const MYSQL: DriverDescriptor = {
-  id: "mysql",
-  displayName: "MySQL",
-  defaultPort: 3306,
-  accentColor: "#0EA5B7",
-  capabilities: {
-    queryLanguage: "sql",
-    resultShape: "tabular",
-    isRelational: true,
-    supportsMultipleDatabases: true,
-    supportsSchemas: false,
-    supportsTransactions: true,
-    supportsDdl: true,
-    supportsExplain: true,
-    supportsCancel: true,
-    objectKinds: ["table", "view", "function", "procedure", "trigger", "event"],
-    supportedActions: MOCK_ACTIONS,
-  },
-  configFields: [
-    { key: "host", label: "Host", fieldType: "text", required: true, defaultValue: "127.0.0.1", options: [] },
-    { key: "port", label: "Port", fieldType: "number", required: true, defaultValue: 3306, options: [] },
-    { key: "username", label: "Username", fieldType: "text", required: true, defaultValue: "root", options: [] },
-    { key: "password", label: "Password", fieldType: "password", required: false, options: [] },
-    { key: "database", label: "Database", fieldType: "text", required: false, options: [] },
-    {
-      key: "sslMode",
-      label: "TLS",
-      fieldType: "select",
-      required: false,
-      defaultValue: "preferred",
-      help: "Disable TLS for servers older than MySQL 5.6.46.",
-      options: [
-        { value: "preferred", label: "Preferred" },
-        { value: "required", label: "Required" },
-        { value: "disabled", label: "Disabled (MySQL < 5.6.46)" },
-      ],
-    },
-  ],
-};
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
-const POSTGRES: DriverDescriptor = {
-  ...MYSQL,
-  id: "postgres",
-  displayName: "PostgreSQL",
-  defaultPort: 5432,
-  accentColor: "#3B82F6",
-  capabilities: {
-    ...MYSQL.capabilities,
-    supportsSchemas: true,
-    objectKinds: ["table", "view", "materializedView", "sequence", "function", "procedure", "trigger"],
-    supportedActions: [...MOCK_ACTIONS, "reindex"],
-  },
-};
-
-const PROFILE: ConnectionProfile = {
-  id: "demo-profile",
-  name: "Local MySQL 5.6",
-  driver: "mysql",
-  host: "127.0.0.1",
-  port: 3306,
-  username: "root",
-  database: "shop",
-  sslMode: "preferred",
-  options: {},
-  hasPassword: true,
-};
-
-const SERVER: ServerInfo = {
-  version: "5.6.51-log",
-  versionNumber: 50651,
-  serverComment: "MySQL Community Server (GPL)",
-  currentDatabase: "shop",
-  currentUser: "root@localhost",
-  supportsTls: true,
-};
-
-const SESSION: SessionInfo = {
-  id: "demo-session",
-  profileId: PROFILE.id,
-  driver: "mysql",
-  name: PROFILE.name,
-  server: SERVER,
-};
-
-const DATABASES: DatabaseInfo[] = [
-  { name: "shop", isSystem: false },
-  { name: "analytics", isSystem: false },
-  { name: "information_schema", isSystem: true },
-  { name: "mysql", isSystem: true },
-];
-
-const OBJECTS: DatabaseObject[] = [
-  { name: "customers", kind: "table", schema: "shop", comment: "Registered buyers", rowEstimate: 12480 },
-  { name: "orders", kind: "table", schema: "shop", comment: "Order headers", rowEstimate: 58231 },
-  { name: "order_items", kind: "table", schema: "shop", comment: null, rowEstimate: 173904 },
-  { name: "products", kind: "table", schema: "shop", comment: "Catalogue", rowEstimate: 812 },
-  { name: "v_recent_orders", kind: "view", schema: "shop", comment: "Last 30 days", rowEstimate: null },
-  { name: "v_order_totals", kind: "view", schema: "shop", comment: "Revenue per order", rowEstimate: null },
-  { name: "fn_order_total", kind: "function", schema: "shop", comment: "Grand total for an order", rowEstimate: null },
-  { name: "sp_reindex_orders", kind: "procedure", schema: "shop", comment: null, rowEstimate: null },
-  { name: "trg_orders_audit", kind: "trigger", schema: "shop", comment: "Audit every order change", rowEstimate: null },
-  { name: "ev_purge_carts", kind: "event", schema: "shop", comment: "Nightly cart cleanup", rowEstimate: null },
-  { name: "orders_id_seq", kind: "sequence", schema: "shop", comment: null, rowEstimate: null },
-];
-
-const SCHEMA: ObjectSchema = {
-  name: "orders",
-  kind: "table",
-  columns: [
-    { name: "id", dataType: "bigint(20) unsigned", nullable: false, isPrimaryKey: true, isAutoIncrement: true, ordinal: 1 },
-    { name: "customer_id", dataType: "bigint(20) unsigned", nullable: false, isPrimaryKey: false, isAutoIncrement: false, ordinal: 2 },
-    { name: "status", dataType: "enum('new','paid','shipped')", nullable: false, isPrimaryKey: false, isAutoIncrement: false, ordinal: 3 },
-    { name: "total", dataType: "decimal(12,2)", nullable: false, isPrimaryKey: false, isAutoIncrement: false, ordinal: 4 },
-    { name: "note", dataType: "text", nullable: true, isPrimaryKey: false, isAutoIncrement: false, ordinal: 5 },
-    { name: "created_at", dataType: "datetime", nullable: false, isPrimaryKey: false, isAutoIncrement: false, ordinal: 6 },
-  ],
-  indexes: [
-    { name: "PRIMARY", columns: ["id"], unique: true, primary: true },
-    { name: "idx_customer", columns: ["customer_id"], unique: false, primary: false },
-  ],
-  foreignKeys: [
-    { name: "fk_orders_customer", columns: ["customer_id"], referencedTable: "customers", referencedColumns: ["id"] },
-  ],
-};
-
-// Mutable so save/delete are observable across mock calls, mirroring the real
-// persisted store closely enough to review the flow in the browser.
-const SNIPPETS: Snippet[] = [
-  {
-    id: "snippet-recent-orders",
-    name: "Recent orders",
-    sql: "SELECT id, customer_id, status, total, created_at\nFROM orders\nORDER BY created_at DESC\nLIMIT 50;",
-    database: "shop",
-    driver: "mysql",
-    createdAt: 1_760_000_000_000,
-  },
-  {
-    id: "snippet-table-sizes",
-    name: "Table sizes",
-    sql: "SELECT table_name, table_rows\nFROM information_schema.tables\nWHERE table_schema = DATABASE()\nORDER BY table_rows DESC;",
-    database: "shop",
-    driver: "mysql",
-    createdAt: 1_760_000_100_000,
-  },
-];
+function delay(): Promise<void> {
+  if (mockLatency.max <= 0) return Promise.resolve();
+  const span = Math.max(0, mockLatency.max - mockLatency.min);
+  return sleep(mockLatency.min + Math.random() * span);
+}
 
 const STATUSES = ["new", "paid", "shipped", "cancelled"];
+
+/** Section-action id the ClickHouse adapter advertises (`drivers/clickhouse.rs`). */
+const DROP_PARTITION = "drop_partition";
+
+/** Rows a request gets when it does not set a limit (`max_rows.unwrap_or(1000)`). */
+const DEFAULT_MAX_ROWS = 1000;
 
 const RESULT_COLUMNS = [
   { name: "id", dataType: "BIGINT" },
@@ -226,6 +92,8 @@ function sampleRows(): unknown[][] {
 
 // A single mutable result set so a row edit made in the grid is visible after
 // the preview reloads, mirroring the real backend closely enough to review.
+// It is shared by every tabular engine: the point of the grid flow is the edit
+// round trip, not per-engine row data.
 const PREVIEW_ROWS: unknown[][] = sampleRows();
 const PREVIEW_COLUMNS = RESULT_COLUMNS.map((column) => column.name);
 
@@ -278,6 +146,51 @@ function changeResponse(kind: string): QueryResponse {
 
 let SETTINGS: Record<string, unknown> = {};
 
+// Mutable so save/delete are observable across mock calls, mirroring the real
+// persisted store closely enough to review the flow in the browser.
+const SNIPPETS: Snippet[] = [
+  {
+    id: "snippet-recent-orders",
+    name: "Recent orders",
+    sql: "SELECT id, customer_id, status, total, created_at\nFROM orders\nORDER BY created_at DESC\nLIMIT 50;",
+    database: "shop",
+    driver: "mysql",
+    createdAt: 1_760_000_000_000,
+  },
+  {
+    id: "snippet-table-sizes",
+    name: "Table sizes",
+    sql: "SELECT table_name, table_rows\nFROM information_schema.tables\nWHERE table_schema = DATABASE()\nORDER BY table_rows DESC;",
+    database: "shop",
+    driver: "mysql",
+    createdAt: 1_760_000_100_000,
+  },
+  {
+    id: "snippet-pg-vacuum",
+    name: "Bloat check",
+    sql: "SELECT relname, n_dead_tup\nFROM pg_stat_user_tables\nORDER BY n_dead_tup DESC;",
+    database: "app",
+    driver: "postgres",
+    createdAt: 1_760_000_200_000,
+  },
+  {
+    id: "snippet-redis-hot-keys",
+    name: "Sample keys",
+    sql: "SCAN 0 COUNT 100",
+    database: "0",
+    driver: "redis",
+    createdAt: 1_760_000_300_000,
+  },
+  {
+    id: "snippet-mongo-new-orders",
+    name: "New orders",
+    sql: '{"find": "orders", "filter": {"status": "new"}, "limit": 20}',
+    database: "app",
+    driver: "mongodb",
+    createdAt: 1_760_000_400_000,
+  },
+];
+
 /**
  * Mirror the real backend: one result per statement, so the multi-statement UI
  * (per-statement tabs, inline errors) can be reviewed in the browser. A
@@ -325,21 +238,105 @@ function buildResult(request: QueryRequest): QueryResponse {
   return { results, totalMs: Math.max(3, Date.now() - started) };
 }
 
-/** Routes a command name to representative fixture data. */
+/**
+ * One editor run in the engine's own result shape. SQL engines share the
+ * tabular preview rows; Redis and Mongo build theirs from the reply mapping the
+ * adapters use (see `./mockReplies`), and refuse an empty script exactly like
+ * the command does.
+ */
+function scriptResult(fixture: EngineFixture, request: QueryRequest): QueryResponse {
+  const maxRows = request.maxRows && request.maxRows > 0 ? request.maxRows : DEFAULT_MAX_ROWS;
+  switch (fixture.driver.capabilities.queryLanguage) {
+    case "redis": {
+      const results = redisStatements(request.sql, fixture.keys ?? [], maxRows);
+      if (results.length === 0) throw new Error("no command to execute");
+      return { results, totalMs: results.length };
+    }
+    case "mongo": {
+      const results = mongoStatements(request.sql, fixture.collections ?? {}, maxRows);
+      if (results.length === 0) throw new Error("no command to execute");
+      return { results, totalMs: results.length };
+    }
+    default:
+      return buildResult(request);
+  }
+}
+
+/** The trait's default explain: prefix `EXPLAIN`, trailing semicolons dropped. */
+function explainSql(sql: string): string {
+  return `EXPLAIN ${sql.trim().replace(/;+$/, "").trim()}`;
+}
+
+/** The plan an engine's `explain_query` returns, in its own shape. */
+function explainResult(fixture: EngineFixture, sql: string): QueryResponse {
+  // Engines without `supports_explain` have no plan shape and refuse, exactly
+  // like the command does against a real server.
+  const plan = fixture.plan;
+  if (!plan) {
+    throw new Error("this driver cannot explain queries");
+  }
+  // A driver that builds the statement itself may refuse this one (ClickHouse
+  // only explains a read), which the command reports as an error.
+  let statement = explainSql(sql);
+  if (fixture.explainStatement) {
+    const built = fixture.explainStatement(sql);
+    if (built === null) {
+      throw new Error("this driver cannot explain queries");
+    }
+    statement = built;
+  }
+  return {
+    results: [
+      {
+        statement,
+        isQuery: true,
+        columns: plan.columns,
+        rows: plan.rows,
+        rowCount: plan.rows.length,
+        affectedRows: null,
+        lastInsertId: null,
+        executionMs: 2,
+        truncated: false,
+        error: null,
+      },
+    ],
+    totalMs: 2,
+  };
+}
+
+/**
+ * The session a call targets. Most commands take `connectionId` as a top-level
+ * argument, but the ones that take a typed request carry it inside that request
+ * (and a batch carries one per entry), so all three shapes are read here.
+ */
+function sessionOf(args?: Record<string, unknown>): unknown {
+  if (typeof args?.connectionId === "string") return args.connectionId;
+  const request = args?.request as { connectionId?: unknown } | undefined;
+  if (typeof request?.connectionId === "string") return request.connectionId;
+  const requests = args?.requests as { connectionId?: unknown }[] | undefined;
+  return Array.isArray(requests) ? requests[0]?.connectionId : undefined;
+}
+
+/** Routes a command name to the fixture of the session's engine. */
 export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  await delay(90 + Math.random() * 120);
+  await delay();
   const respond = (value: unknown) => value as T;
+  const fixture = fixtureFor(sessionOf(args));
+  const namespace = typeof args?.namespace === "string" ? args.namespace : null;
 
   switch (cmd) {
     case "list_drivers":
-      return respond([MYSQL, POSTGRES]);
+      return respond(FIXTURES.map((entry) => entry.driver) satisfies DriverDescriptor[]);
     case "list_connections":
-      return respond([PROFILE]);
+      return respond(FIXTURES.map((entry) => entry.profile) satisfies ConnectionProfile[]);
     case "list_sessions":
-      return respond([SESSION]);
+      // MySQL stays first so the default demo session is unchanged; every other
+      // engine is reachable from the session picker.
+      return respond(FIXTURES.map((entry) => entry.session) satisfies SessionInfo[]);
     case "save_connection": {
-      const input = (args?.input ?? {}) as Partial<ConnectionProfile>;
-      return respond({ ...PROFILE, ...input, hasPassword: true } as ConnectionProfile);
+      const input = (args?.input ?? {}) as Partial<ConnectionProfile> & { driver?: string };
+      const base = fixtureForDriver(input.driver).profile;
+      return respond({ ...base, ...input, hasPassword: true } as ConnectionProfile);
     }
     case "delete_connection":
     case "disconnect":
@@ -347,93 +344,113 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     case "set_settings":
       SETTINGS = (args?.value as Record<string, unknown>) ?? {};
       return respond(undefined);
-    case "connect":
-      return respond({ session: SESSION } satisfies ConnectResult);
-    case "test_connection":
-      return respond(SERVER);
+    case "connect": {
+      const input = (args?.input ?? {}) as {
+        profileId?: string | null;
+        config?: { driver?: string } | null;
+      };
+      const target = fixtureForProfile(input.profileId) ?? fixtureForDriver(input.config?.driver);
+      return respond({ session: target.session } satisfies ConnectResult);
+    }
+    case "test_connection": {
+      const config = (args?.config ?? {}) as { driver?: string };
+      return respond(fixtureForDriver(config.driver).server satisfies ServerInfo);
+    }
     case "list_databases":
-      return respond(DATABASES);
+      return respond(fixture.databases);
     case "list_namespaces":
-      return respond([] satisfies NamespaceInfo[]);
-    case "list_objects":
-      return respond(OBJECTS);
-    case "describe_object":
-      return respond(SCHEMA);
-    case "list_table_columns":
+      return respond(fixture.namespaces satisfies NamespaceInfo[]);
+    case "list_objects": {
+      const database = typeof args?.database === "string" ? args.database : "";
+      // Objects are tagged with the database/namespace they live in, exactly as
+      // the adapters report them: a namespace narrows the list, and a database
+      // with no fixture simply lists nothing.
       return respond(
-        OBJECTS.filter((object) =>
-          ["table", "view", "materializedView"].includes(object.kind),
-        ).map((object) => ({
-          table: object.name,
-          schema: "shop",
-          columns:
-            object.name === "orders"
-              ? SCHEMA.columns.map((column) => ({
-                  name: column.name,
-                  dataType: column.dataType,
-                }))
-              : [
-                  { name: "id", dataType: "bigint" },
-                  { name: "name", dataType: "varchar" },
-                  { name: "updated_at", dataType: "datetime" },
-                ],
-        })),
+        fixture.objects.filter((entry) =>
+          namespace ? entry.schema === namespace : !database || entry.schema === database,
+        ),
       );
+    }
+    case "describe_object": {
+      const object = String(args?.object ?? fixture.objects[0]?.name ?? "orders");
+      return respond(fixture.schema(object, namespace));
+    }
+    case "list_table_columns": {
+      // Only the kinds this adapter can report columns for, scoped to the
+      // selected namespace or database exactly like `list_objects`.
+      const database = typeof args?.database === "string" ? args.database : "";
+      return respond(
+        fixture.objects
+          .filter((entry) => fixture.completableKinds.includes(entry.kind))
+          .filter((entry) =>
+            namespace ? entry.schema === namespace : !database || entry.schema === database,
+          )
+          .map((entry) => ({
+            table: entry.name,
+            schema: entry.schema,
+            columns: fixture.schema(entry.name, entry.schema ?? null).columns.map((column) => ({
+              name: column.name,
+              dataType: column.dataType,
+            })),
+          })),
+      );
+    }
     case "execute_query": {
       const request = (args?.request as QueryRequest) ?? { sql: "SELECT 1" };
       // A `slow`/`sleep` statement simulates a long query so the Stop button
       // and cancelled state can be exercised in the browser.
       if (/\b(slow|sleep)\b/i.test(request.sql)) {
-        await delay(4000);
+        await sleep(mockSlowQueryMs);
       }
-      return respond(buildResult(request));
+      return respond(scriptResult(fixture, request));
     }
     case "cancel_query":
       return respond(true);
     case "explain_query": {
       const request = (args?.request as QueryRequest) ?? { sql: "SELECT 1" };
+      return respond(explainResult(fixture, request.sql));
+    }
+    case "object_section": {
+      const request = (args?.request as ObjectSectionRequest) ?? null;
+      const section = request?.section ?? "";
+      // Engines without on-demand sections refuse exactly like the adapter's
+      // default, so the UI's error path is the one a real server would produce.
+      if (!fixture.sectionBody) {
+        throw new Error("this driver has no on-demand inspector sections");
+      }
+      return respond(fixture.sectionBody(section));
+    }
+    case "object_section_action": {
+      const request = args?.request as ObjectSectionActionRequest | undefined;
+      if (!fixture.sectionBody || !request) {
+        throw new Error("this driver has no inspector section actions");
+      }
+      const param = request.param ?? "";
+      const statement =
+        request.action === DROP_PARTITION
+          ? `ALTER TABLE "${request.database}"."${request.object}" DROP PARTITION ID '${param}'`
+          : `OPTIMIZE TABLE "${request.database}"."${request.object}" PARTITION ID '${param}'`;
       return respond({
         results: [
           {
-            statement: `EXPLAIN ${request.sql.trim()}`,
-            isQuery: true,
-            columns: [
-              { name: "id", dataType: "INT" },
-              { name: "select_type", dataType: "VARCHAR" },
-              { name: "table", dataType: "VARCHAR" },
-              { name: "type", dataType: "VARCHAR" },
-              { name: "possible_keys", dataType: "VARCHAR" },
-              { name: "key", dataType: "VARCHAR" },
-              { name: "rows", dataType: "BIGINT" },
-              { name: "Extra", dataType: "VARCHAR" },
-            ],
-            rows: [
-              [1, "SIMPLE", "orders", "ref", "idx_customer", "idx_customer", 137, "Using where"],
-              [1, "SIMPLE", "customers", "eq_ref", "PRIMARY", "PRIMARY", 1, "Using index"],
-            ],
-            rowCount: 2,
-            affectedRows: null,
+            statement,
+            isQuery: false,
+            columns: [],
+            rows: [],
+            rowCount: 0,
+            affectedRows: 1,
             lastInsertId: null,
-            executionMs: 2,
+            executionMs: 3,
             truncated: false,
             error: null,
           },
         ],
-        totalMs: 2,
+        totalMs: 3,
       } satisfies QueryResponse);
     }
     case "object_detail": {
-      const object = (args?.object as string) ?? "orders";
-      const schema: ObjectSchema = { ...SCHEMA, name: object };
-      const ddl = `CREATE TABLE \`${object}\` (\n  \`id\` bigint(20) unsigned NOT NULL AUTO_INCREMENT,\n  \`customer_id\` bigint(20) unsigned NOT NULL,\n  \`status\` enum('new','paid','shipped') NOT NULL,\n  \`total\` decimal(12,2) NOT NULL,\n  \`note\` text,\n  \`created_at\` datetime NOT NULL,\n  PRIMARY KEY (\`id\`),\n  KEY \`idx_customer\` (\`customer_id\`)\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;`;
-      return respond({
-        schema,
-        ddl,
-        rowCount: 58231,
-        sizeBytes: null,
-        actions: MOCK_ACTIONS,
-        identifierQuote: "`",
-      } satisfies ObjectDetail);
+      const object = String(args?.object ?? fixture.objects[0]?.name ?? "orders");
+      return respond(detailOf(fixture, object, namespace));
     }
     case "apply_row_change": {
       const request = (args?.request as RowChangeRequest) ?? ({ kind: "update" } as RowChangeRequest);
@@ -469,7 +486,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       } satisfies QueryResponse);
     }
     case "count_rows":
-      return respond(58231);
+      return respond(fixture.count(String(args?.object ?? fixture.objects[0]?.name ?? "orders")));
     case "object_action": {
       const request = (args?.request as ObjectActionRequest) ?? { action: "dropObject" };
       return respond({

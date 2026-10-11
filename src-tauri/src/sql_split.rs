@@ -16,6 +16,77 @@ enum State {
     DollarQuote,
 }
 
+/// Words that name a body-bearing object when they follow `CREATE`.
+const BODY_KINDS: [&str; 4] = ["TRIGGER", "PROCEDURE", "FUNCTION", "EVENT"];
+/// How many leading words of a statement are remembered to recognise its kind.
+const HEAD_WORDS: usize = 8;
+
+/// Tracks `BEGIN ... END` and `CASE ... END` nesting inside a trigger, procedure,
+/// function or event definition, so a `;` inside its body does not end the
+/// statement. Only statements that start with `CREATE` and name one of
+/// [`BODY_KINDS`] are tracked; everywhere else `;` splits as before.
+#[derive(Default)]
+struct BlockTracker {
+    head: Vec<String>,
+    depth: usize,
+    pending_end: bool,
+}
+
+impl BlockTracker {
+    fn in_body_statement(&self) -> bool {
+        self.head.first().map(String::as_str) == Some("CREATE")
+            && self
+                .head
+                .iter()
+                .any(|word| BODY_KINDS.contains(&word.as_str()))
+    }
+
+    /// Feed one upper-cased bare word (identifier or keyword) to the tracker.
+    fn word(&mut self, word: &str) {
+        if self.head.len() < HEAD_WORDS {
+            self.head.push(word.to_string());
+        }
+        if !self.in_body_statement() {
+            return;
+        }
+        if self.pending_end {
+            self.pending_end = false;
+            match word {
+                // `END IF`, `END LOOP`, ... close constructs whose opener is
+                // never counted, so they leave the depth alone.
+                "IF" | "LOOP" | "WHILE" | "REPEAT" => return,
+                // `END CASE` closes a counted CASE.
+                "CASE" => {
+                    self.depth = self.depth.saturating_sub(1);
+                    return;
+                }
+                _ => self.depth = self.depth.saturating_sub(1),
+            }
+        }
+        match word {
+            "BEGIN" | "CASE" => self.depth += 1,
+            "END" => self.pending_end = true,
+            _ => {}
+        }
+    }
+
+    /// An `END` directly before a `;` has no following word to inspect, so it
+    /// closes its block now.
+    fn finish_pending(&mut self) {
+        if self.pending_end {
+            self.pending_end = false;
+            self.depth = self.depth.saturating_sub(1);
+        }
+    }
+}
+
+fn flush_word(word: &mut String, tracker: &mut BlockTracker) {
+    if !word.is_empty() {
+        tracker.word(word);
+        word.clear();
+    }
+}
+
 /// Split `sql` into non-empty, trimmed statements.
 pub fn split_statements(sql: &str) -> Vec<String> {
     let mut statements = Vec::new();
@@ -23,8 +94,18 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     let mut state = State::Normal;
     let mut chars = sql.chars().peekable();
     let mut dollar_tag: Option<String> = None;
+    let mut word = String::new();
+    let mut tracker = BlockTracker::default();
 
     while let Some(c) = chars.next() {
+        if state == State::Normal {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                word.push(c.to_ascii_uppercase());
+                current.push(c);
+                continue;
+            }
+            flush_word(&mut word, &mut tracker);
+        }
         match state {
             State::Normal => match c {
                 '\'' => {
@@ -63,7 +144,13 @@ pub fn split_statements(sql: &str) -> Vec<String> {
                     current.push(chars.next().unwrap());
                 }
                 ';' => {
-                    push_statement(&mut statements, &mut current);
+                    tracker.finish_pending();
+                    if tracker.depth == 0 {
+                        push_statement(&mut statements, &mut current);
+                        tracker = BlockTracker::default();
+                    } else {
+                        current.push(c);
+                    }
                 }
                 _ => current.push(c),
             },
@@ -127,6 +214,8 @@ pub fn split_statements(sql: &str) -> Vec<String> {
         }
     }
 
+    flush_word(&mut word, &mut tracker);
+    tracker.finish_pending();
     push_statement(&mut statements, &mut current);
     statements
 }
@@ -198,6 +287,38 @@ mod tests {
         let out = split_statements("CREATE FUNCTION f() AS $$ BEGIN; END; $$ LANGUAGE plpgsql;");
         assert_eq!(out.len(), 1);
         assert!(out[0].contains("BEGIN; END;"));
+    }
+
+    #[test]
+    fn keeps_sqlite_trigger_body_together() {
+        let sql = "CREATE TRIGGER t AFTER INSERT ON a BEGIN INSERT INTO b VALUES (1); UPDATE c SET x = CASE WHEN NEW.x > 0 THEN 1 ELSE 0 END; END; SELECT 2";
+        let out = split_statements(sql);
+        assert_eq!(out.len(), 2);
+        assert!(out[0].starts_with("CREATE TRIGGER"));
+        assert!(out[0].ends_with("END"));
+        assert_eq!(out[1], "SELECT 2");
+    }
+
+    #[test]
+    fn keeps_mysql_procedure_control_flow_together() {
+        let sql = "CREATE PROCEDURE p() BEGIN IF x THEN SELECT 1; END IF; CASE WHEN 1 THEN SELECT 2; END CASE; END; SELECT 3";
+        let out = split_statements(sql);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1], "SELECT 3");
+    }
+
+    #[test]
+    fn if_exists_inside_a_body_does_not_open_a_block() {
+        let sql = "CREATE PROCEDURE p() BEGIN DROP TABLE IF EXISTS x; SELECT 1; END; SELECT 2";
+        let out = split_statements(sql);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[1], "SELECT 2");
+    }
+
+    #[test]
+    fn case_outside_a_body_statement_is_not_tracked() {
+        let out = split_statements("SELECT CASE WHEN 1 THEN 2 END; SELECT 3");
+        assert_eq!(out, vec!["SELECT CASE WHEN 1 THEN 2 END", "SELECT 3"]);
     }
 
     #[test]

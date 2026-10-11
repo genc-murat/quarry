@@ -31,7 +31,11 @@ impl SessionManager {
     }
 
     pub async fn get(&self, id: &str) -> Option<Arc<dyn Connection>> {
-        self.sessions.read().await.get(id).map(|e| e.connection.clone())
+        self.sessions
+            .read()
+            .await
+            .get(id)
+            .map(|e| e.connection.clone())
     }
 
     pub async fn remove(&self, id: &str) -> Option<SessionEntry> {

@@ -5,8 +5,12 @@
 //! registering the driver in [`DriverRegistry::with_builtins`] — no changes to
 //! the IPC layer or the frontend are required.
 
+pub mod clickhouse;
+pub mod mongo;
 pub mod mysql;
 pub mod postgres;
+pub mod redis;
+pub mod sqlite;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -17,10 +21,11 @@ use tokio_util::sync::CancellationToken;
 use crate::ddl::{self, Dialect};
 use crate::error::{DriverError, Result};
 use crate::models::{
-    ColumnMeta, ColumnSchema, ConfigField, ConnectionConfig, DatabaseInfo, DatabaseObject,
-    DriverCapabilities, DriverDescriptor, ForeignKeySchema, IndexSchema, NamespaceInfo,
-    CreateTableRequest, ObjectAction, ObjectActionRequest, ObjectKind, ObjectSchema,
-    QueryRequest, QueryResponse, RowChangeKind, RowChangeRequest, ServerInfo, TableColumns,
+    ColumnMeta, ColumnSchema, ConfigField, ConnectionConfig, CreateTableRequest, DatabaseInfo,
+    DatabaseObject, DriverCapabilities, DriverDescriptor, ForeignKeySchema, IndexSchema,
+    InspectorSection, NamespaceInfo, ObjectAction, ObjectActionRequest, ObjectKind, ObjectSchema,
+    QueryRequest, QueryResponse, RowChangeKind, RowChangeRequest, SectionActionRequest,
+    SectionRequest, ServerInfo, TableColumns,
 };
 
 /// A database engine (MySQL, PostgreSQL, ...).
@@ -36,6 +41,31 @@ pub trait DatabaseDriver: Send + Sync {
     /// Schema for the dynamic connection form.
     fn config_fields(&self) -> Vec<ConfigField>;
 
+    /// SQL dialect the engine quotes identifiers with and generates DDL in.
+    ///
+    /// The only copy of the fact: a connection carries the driver it was opened
+    /// by and answers [`Connection::dialect`] from here, so quoting in a session
+    /// can never disagree with what the engine declares. The frontend's mocked
+    /// drivers are checked against it without a live server.
+    fn dialect(&self) -> Dialect {
+        Dialect::Ansi
+    }
+
+    /// The statement that returns `statement`'s execution plan, or `None` when
+    /// the engine cannot explain it.
+    ///
+    /// The default is the SQL keyword form, gated on the capability the driver
+    /// advertises, so an engine without EXPLAIN declares `None` and every one of
+    /// its connections inherits that answer. An engine with its own plan
+    /// statement (SQLite's `EXPLAIN QUERY PLAN`, ClickHouse's
+    /// `EXPLAIN indexes = 1`) overrides it, and its connections answer from the
+    /// override.
+    fn explain_statement(&self, statement: &str) -> Option<String> {
+        self.capabilities()
+            .supports_explain
+            .then(|| explain_sql(statement))
+    }
+
     /// Open a short lived connection and return server metadata without keeping
     /// a session around. Used by the "Test connection" button.
     async fn test(&self, config: &ConnectionConfig) -> Result<ServerInfo>;
@@ -47,9 +77,33 @@ pub trait DatabaseDriver: Send + Sync {
 /// An open connection to one database server.
 #[async_trait]
 pub trait Connection: Send + Sync {
-    fn driver_id(&self) -> &'static str;
+    /// Identifier of the driver this connection belongs to (`"mysql"`, ...),
+    /// read from the held driver so a session can never report an id the
+    /// registry does not know.
+    fn driver_id(&self) -> &'static str {
+        self.driver().id()
+    }
+
+    /// The driver this connection was opened by.
+    ///
+    /// A driver is a stateless declaration, so the connection embeds the one it
+    /// belongs to and reads what the engine says about itself from it: its
+    /// identifier ([`Connection::driver_id`]), what it can do
+    /// ([`Connection::capabilities`]), the SQL dialect it quotes and generates
+    /// DDL with ([`Connection::dialect`]) and how it explains a statement
+    /// ([`Connection::explain_statement`]). Those facts therefore have exactly
+    /// one implementation, on the driver — the same one the frontend's fixtures
+    /// are checked against.
+    fn driver(&self) -> &dyn DatabaseDriver;
+
     fn server_info(&self) -> &ServerInfo;
-    fn capabilities(&self) -> DriverCapabilities;
+
+    /// What the engine can do, read from the held driver. The UI gates features
+    /// on these flags, so a session cannot offer something the driver does not
+    /// declare.
+    fn capabilities(&self) -> DriverCapabilities {
+        self.driver().capabilities()
+    }
 
     async fn ping(&self) -> Result<()>;
 
@@ -87,7 +141,10 @@ pub trait Connection: Send + Sync {
         let objects = self.list_objects(database, namespace).await?;
         let mut out = Vec::with_capacity(objects.len());
         for object in objects {
-            let Ok(schema) = self.describe_object(database, namespace, &object.name).await else {
+            let Ok(schema) = self
+                .describe_object(database, namespace, &object.name)
+                .await
+            else {
                 continue;
             };
             out.push(TableColumns {
@@ -122,15 +179,16 @@ pub trait Connection: Send + Sync {
     }
 
     /// Rewrite a statement into one that returns its execution plan, or `None`
-    /// when the adapter has no EXPLAIN. The default uses the SQL keyword form,
-    /// which is valid for every relational engine compiled in today.
+    /// when the engine has no EXPLAIN. Read from the driver, which is where the
+    /// declaration lives.
     fn explain_statement(&self, statement: &str) -> Option<String> {
-        Some(explain_sql(statement))
+        self.driver().explain_statement(statement)
     }
 
-    /// SQL dialect used for identifier quoting and generated DDL.
+    /// SQL dialect used for identifier quoting and generated DDL. Read from the
+    /// driver, so a connection cannot quote differently than it declares.
     fn dialect(&self) -> Dialect {
-        Dialect::Ansi
+        self.driver().dialect()
     }
 
     /// Quote a single identifier using the connection's dialect.
@@ -147,8 +205,36 @@ pub trait Connection: Send + Sync {
         self.dialect().quote_qualified(qualifier, object)
     }
 
-    /// Generated `CREATE` DDL for an object. The default reconstructs it from
-    /// introspection, which works for every SQL adapter.
+    /// Panels this driver contributes to the object inspector. The default
+    /// advertises none, so an engine with extra detail adds a section here
+    /// instead of a field on [`crate::models::ObjectDetail`].
+    async fn inspect_sections(
+        &self,
+        _database: &str,
+        _namespace: Option<&str>,
+        _object: &str,
+        _schema: &ObjectSchema,
+    ) -> Result<Vec<InspectorSection>> {
+        Ok(vec![])
+    }
+
+    /// Body of a `Live` section, fetched when the user opens it. The driver must
+    /// answer for every id it advertised in [`Connection::inspect_sections`].
+    async fn section_body(&self, _request: &SectionRequest) -> Result<InspectorSection> {
+        Err(DriverError::Unsupported(
+            "this driver has no on-demand inspector sections".into(),
+        ))
+    }
+
+    /// Run an operation a section advertised. Drivers re-validate the request
+    /// (target object, engine, row parameter) because the UI only forwards ids
+    /// and parameters it was given.
+    async fn run_section_action(&self, _request: SectionActionRequest) -> Result<QueryResponse> {
+        Err(DriverError::Unsupported(
+            "this driver has no inspector section actions".into(),
+        ))
+    }
+
     async fn object_ddl(
         &self,
         database: &str,
@@ -188,9 +274,9 @@ pub trait Connection: Send + Sync {
             return Err(DriverError::Query(error));
         }
         match statement.rows.first().and_then(|row| row.first()) {
-            Some(serde_json::Value::Number(number)) => number.as_u64().ok_or_else(|| {
-                DriverError::Query("row count was not an integer".into())
-            }),
+            Some(serde_json::Value::Number(number)) => number
+                .as_u64()
+                .ok_or_else(|| DriverError::Query("row count was not an integer".into())),
             Some(serde_json::Value::String(text)) => text
                 .parse::<u64>()
                 .map_err(|_| DriverError::Query("row count was not an integer".into())),
@@ -231,6 +317,28 @@ pub trait Connection: Send + Sync {
         .await
     }
 
+    /// Apply a bounded batch of row changes. Engines with a bulk protocol may
+    /// override this; the default preserves the existing per-row semantics.
+    async fn apply_row_changes(&self, requests: Vec<RowChangeRequest>) -> Result<QueryResponse> {
+        let started = std::time::Instant::now();
+        let mut results = Vec::with_capacity(requests.len());
+        for request in requests {
+            let response = self.apply_row_change(request).await?;
+            if let Some(error) = response
+                .results
+                .iter()
+                .find_map(|item| item.error.as_deref())
+            {
+                return Err(DriverError::Query(error.to_string()));
+            }
+            results.extend(response.results);
+        }
+        Ok(QueryResponse {
+            results,
+            total_ms: started.elapsed().as_millis() as u64,
+        })
+    }
+
     /// Create a table from the wizard definition. The default renders dialect
     /// SQL with [`ddl::create_table_from_columns`] and runs it.
     async fn create_table(&self, request: CreateTableRequest) -> Result<QueryResponse> {
@@ -257,8 +365,12 @@ impl DriverRegistry {
         let mut registry = DriverRegistry {
             drivers: BTreeMap::new(),
         };
+        registry.register(Arc::new(clickhouse::ClickHouseDriver::new()));
+        registry.register(Arc::new(mongo::MongoDriver::new()));
         registry.register(Arc::new(mysql::MySqlDriver::new()));
         registry.register(Arc::new(postgres::PostgresDriver::new()));
+        registry.register(Arc::new(sqlite::SqliteDriver::new()));
+        registry.register(Arc::new(redis::RedisDriver::new()));
         registry
     }
 
@@ -355,6 +467,7 @@ pub fn object_kind_from_marker(marker: &str) -> ObjectKind {
         "MATERIALIZED VIEW" => ObjectKind::MaterializedView,
         "COLLECTION" => ObjectKind::Collection,
         "KEYSPACE" => ObjectKind::KeySpace,
+        "KEY" => ObjectKind::Key,
         "FUNCTION" => ObjectKind::Function,
         "PROCEDURE" => ObjectKind::Procedure,
         "TRIGGER" => ObjectKind::Trigger,
@@ -389,8 +502,99 @@ pub fn build_object_schema(
 
 #[cfg(test)]
 mod tests {
-    use super::{explain_sql, object_kind_from_marker};
+    use std::path::Path;
+
+    use serde_json::{json, Value};
+
+    use super::{explain_sql, object_kind_from_marker, DriverRegistry};
+    use crate::ddl::Dialect;
     use crate::models::ObjectKind;
+
+    /// Path of the snapshot the frontend's fixtures are checked against.
+    fn snapshot_path() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../src/lib/fixtures/driver-descriptors.json")
+    }
+
+    /// The character a dialect wraps identifiers in.
+    fn quote_char(dialect: Dialect) -> String {
+        dialect
+            .quote("x")
+            .chars()
+            .next()
+            .map(String::from)
+            .unwrap_or_default()
+    }
+
+    /// Every registered driver's declaration, as the frontend sees it: the
+    /// `list_drivers` descriptor, plus the two facts the driver declares that
+    /// the dev mock also mirrors — the identifier quote its templates are built
+    /// with, and the statement a read is explained with (`null` when the engine
+    /// cannot explain).
+    fn descriptor_snapshot() -> String {
+        let registry = DriverRegistry::with_builtins();
+        let entries: Vec<Value> = registry
+            .descriptors()
+            .into_iter()
+            .map(|descriptor| {
+                let driver = registry
+                    .get(&descriptor.id)
+                    .unwrap_or_else(|| panic!("{} is registered", descriptor.id));
+                let mut value = serde_json::to_value(&descriptor).expect("a descriptor serializes");
+                let map = value.as_object_mut().expect("a descriptor is an object");
+                map.insert("identifierQuote".into(), json!(quote_char(driver.dialect())));
+                map.insert(
+                    "explainSelect".into(),
+                    json!(driver.explain_statement("SELECT 1")),
+                );
+                value
+            })
+            .collect();
+
+        let mut snapshot = serde_json::to_string_pretty(&entries).expect("the snapshot serializes");
+        snapshot.push('\n');
+        snapshot
+    }
+
+    /// The frontend cannot import Rust, so `src/lib/fixtures/driver-descriptors.json`
+    /// is the contract between the two languages: this test keeps the snapshot
+    /// honest against the registry, and `src/lib/fixtureDrift.test.ts` keeps
+    /// `src/lib/mockFixtures.ts` honest against the snapshot. A capability, field,
+    /// action, identifier quote or explain statement that only one side knows
+    /// about then fails a test instead of silently showing the browser a surface
+    /// the engine does not have.
+    ///
+    /// After an intentional change to a driver, regenerate the snapshot with
+    ///
+    /// ```sh
+    /// QUARRY_UPDATE_SNAPSHOT=1 cargo test --manifest-path src-tauri/Cargo.toml descriptor_snapshot
+    /// ```
+    ///
+    /// and bring the fixture in line (`npm run check:drift` runs both halves).
+    #[test]
+    fn descriptor_snapshot_matches_the_registry() {
+        let expected = descriptor_snapshot();
+        let path = snapshot_path();
+
+        if std::env::var_os("QUARRY_UPDATE_SNAPSHOT").is_some() {
+            std::fs::create_dir_all(path.parent().expect("snapshot directory"))
+                .expect("the fixture directory is writable");
+            std::fs::write(&path, &expected).expect("the snapshot is written");
+            return;
+        }
+
+        let stored = std::fs::read_to_string(&path).unwrap_or_else(|error| {
+            panic!(
+                "cannot read {}: {error}\nregenerate it with QUARRY_UPDATE_SNAPSHOT=1",
+                path.display()
+            )
+        });
+        assert_eq!(
+            serde_json::from_str::<Value>(&stored).expect("the snapshot is valid JSON"),
+            serde_json::from_str::<Value>(&expected).expect("the snapshot is valid JSON"),
+            "the driver descriptor snapshot is stale: regenerate it with \
+             QUARRY_UPDATE_SNAPSHOT=1 and bring src/lib/mockFixtures.ts in line"
+        );
+    }
 
     #[test]
     fn explain_prefixes_and_trims_semicolons() {

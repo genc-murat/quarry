@@ -171,7 +171,9 @@ fn load_or_create_key(path: &Path) -> [u8; KEY_LEN] {
         let _ = fs::create_dir_all(parent);
     }
     if let Err(error) = fs::write(path, BASE64.encode(bytes)) {
-        tracing::warn!("could not persist secret key: {error}; passwords will not survive a restart");
+        tracing::warn!(
+            "could not persist secret key: {error}; passwords will not survive a restart"
+        );
     } else {
         restrict_permissions(path);
     }

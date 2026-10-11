@@ -17,6 +17,7 @@ export const OBJECT_KIND_ORDER: ObjectKind[] = [
   "materializedView",
   "collection",
   "keySpace",
+  "key",
   "function",
   "procedure",
   "trigger",
@@ -31,6 +32,7 @@ export const OBJECT_KIND_LABEL: Record<ObjectKind, string> = {
   materializedView: "Materialized views",
   collection: "Collections",
   keySpace: "Keyspaces",
+  key: "Keys",
   function: "Functions",
   procedure: "Procedures",
   trigger: "Triggers",
@@ -81,6 +83,21 @@ export function objectKey(ref: ObjectRef): string {
 /** Quote an identifier using the driver's quote character. */
 export function quoteIdentifier(name: string, quote = '"'): string {
   return `${quote}${name.split(quote).join(quote + quote)}${quote}`;
+}
+
+/**
+ * The SQL dialect behind a driver id. The identifier quote character alone is
+ * not enough to tell PostgreSQL and SQLite apart, yet their generated SQL
+ * differs (identity vs. `INTEGER PRIMARY KEY AUTOINCREMENT`), so the preview
+ * builders key off the driver id instead.
+ */
+export type SqlDialect = "mysql" | "postgres" | "sqlite" | "clickhouse";
+
+export function dialectForDriver(driverId: string | null | undefined): SqlDialect {
+  if (driverId === "mysql") return "mysql";
+  if (driverId === "sqlite") return "sqlite";
+  if (driverId === "clickhouse") return "clickhouse";
+  return "postgres";
 }
 
 /** Fully qualified, quoted name (schema for PostgreSQL, database for MySQL). */

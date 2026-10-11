@@ -8,10 +8,13 @@ import type {
   DatabaseInfo,
   DatabaseObject,
   DriverDescriptor,
+  InspectorSection,
   NamespaceInfo,
   ObjectActionRequest,
   ObjectDetail,
   ObjectSchema,
+  ObjectSectionActionRequest,
+  ObjectSectionRequest,
   OpenSessionRequest,
   QueryRequest,
   QueryResponse,
@@ -76,9 +79,14 @@ export const ipc = {
   cancelQuery: (runId: string) => call<boolean>("cancel_query", { runId }),
   explainQuery: (connectionId: string, request: QueryRequest) =>
     call<QueryResponse>("explain_query", { connectionId, request }),
-
   objectDetail: (connectionId: string, database: string, namespace: string | null, object: string) =>
     call<ObjectDetail>("object_detail", { connectionId, database, namespace, object }),
+  /** Fetch the body of a driver-declared `live` inspector section. */
+  objectSection: (request: ObjectSectionRequest) =>
+    call<InspectorSection>("object_section", { request }),
+  /** Run an operation a driver-declared inspector section advertised. */
+  objectSectionAction: (request: ObjectSectionActionRequest) =>
+    call<QueryResponse>("object_section_action", { request }),
   objectAction: (request: ObjectActionRequest) =>
     call<QueryResponse>("object_action", { request }),
   applyRowChange: (request: RowChangeRequest) =>

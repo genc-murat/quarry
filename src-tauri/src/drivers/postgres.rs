@@ -19,14 +19,16 @@ use sqlx::types::{BigDecimal, Uuid};
 use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
 use tokio_util::sync::CancellationToken;
 
-use super::{build_object_schema, object_kind_from_marker, relational_actions, Connection, DatabaseDriver};
+use super::{
+    build_object_schema, object_kind_from_marker, relational_actions, Connection, DatabaseDriver,
+};
 use crate::ddl::Dialect;
 use crate::error::{DriverError, Result};
 use crate::models::{
     ColumnMeta, ColumnSchema, ConfigField, ConnectionConfig, DatabaseInfo, DatabaseObject,
     DriverCapabilities, FieldType, ForeignKeySchema, IndexSchema, NamespaceInfo, ObjectAction,
-    ObjectKind, ObjectSchema, QueryLanguage, QueryRequest, QueryResponse, ResultShape, SelectOption,
-    ServerInfo, SslMode, StatementResult, TableColumns,
+    ObjectKind, ObjectSchema, QueryLanguage, QueryRequest, QueryResponse, ResultShape,
+    SelectOption, ServerInfo, SslMode, StatementResult, TableColumns,
 };
 use crate::sql_split::split_statements;
 
@@ -209,6 +211,10 @@ impl DatabaseDriver for PostgresDriver {
         config_fields()
     }
 
+    fn dialect(&self) -> Dialect {
+        Dialect::Postgres
+    }
+
     async fn test(&self, config: &ConnectionConfig) -> Result<ServerInfo> {
         let pool = pool_for(config, 1).await?;
         let info = fetch_server_info(&pool).await;
@@ -219,7 +225,11 @@ impl DatabaseDriver for PostgresDriver {
     async fn connect(&self, config: &ConnectionConfig) -> Result<Arc<dyn Connection>> {
         let pool = pool_for(config, 5).await?;
         let info = fetch_server_info(&pool).await?;
-        Ok(Arc::new(PostgresConnection { pool, info }))
+        Ok(Arc::new(PostgresConnection {
+            driver: PostgresDriver::new(),
+            pool,
+            info,
+        }))
     }
 }
 
@@ -248,13 +258,10 @@ async fn fetch_server_info(pool: &PgPool) -> Result<ServerInfo> {
         .map_err(|e| DriverError::Connect(e.to_string()))?;
 
     let version: Option<String> = row.try_get("version").ok();
-    let version_number = version
-        .as_deref()
-        .and_then(parse_pg_version)
-        .and_then(|v| {
-            let major: u64 = v.split('.').next()?.parse().ok()?;
-            Some(major)
-        });
+    let version_number = version.as_deref().and_then(parse_pg_version).and_then(|v| {
+        let major: u64 = v.split('.').next()?.parse().ok()?;
+        Some(major)
+    });
     let supports_tls = sqlx::query("SHOW ssl")
         .fetch_optional(pool)
         .await
@@ -275,26 +282,23 @@ async fn fetch_server_info(pool: &PgPool) -> Result<ServerInfo> {
 }
 
 pub struct PostgresConnection {
+    /// The driver this connection was opened by. [`PostgresDriver`] is a
+    /// stateless declaration, so the connection carries it and answers what the
+    /// engine says about itself (its id, capabilities, dialect and plan
+    /// statement) from here instead of repeating it.
+    driver: PostgresDriver,
     pool: PgPool,
     info: ServerInfo,
 }
 
 #[async_trait]
 impl Connection for PostgresConnection {
-    fn driver_id(&self) -> &'static str {
-        "postgres"
+    fn driver(&self) -> &dyn DatabaseDriver {
+        &self.driver
     }
 
     fn server_info(&self) -> &ServerInfo {
         &self.info
-    }
-
-    fn capabilities(&self) -> DriverCapabilities {
-        capabilities()
-    }
-
-    fn dialect(&self) -> Dialect {
-        Dialect::Postgres
     }
 
     async fn ping(&self) -> Result<()> {
@@ -433,7 +437,8 @@ impl Connection for PostgresConnection {
         let mut columns: Vec<ColumnSchema> = column_rows
             .into_iter()
             .map(|row| {
-                let is_nullable: String = row.try_get("is_nullable").unwrap_or_else(|_| "YES".into());
+                let is_nullable: String =
+                    row.try_get("is_nullable").unwrap_or_else(|_| "YES".into());
                 let default_value: Option<String> = row.try_get("column_default").ok();
                 ColumnSchema {
                     name: row.try_get("column_name").unwrap_or_default(),
@@ -496,15 +501,20 @@ impl Connection for PostgresConnection {
         }
 
         let fk_rows = sqlx::query(
-            "SELECT tc.constraint_name, kcu.column_name, \
-                    ccu.table_name AS referenced_table, ccu.column_name AS referenced_column \
-             FROM information_schema.table_constraints tc \
-             JOIN information_schema.key_column_usage kcu \
-               ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema \
-             JOIN information_schema.constraint_column_usage ccu \
-               ON ccu.constraint_name = tc.constraint_name AND ccu.table_schema = tc.table_schema \
-             WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = $1 AND tc.table_name = $2 \
-             ORDER BY tc.constraint_name",
+            "SELECT con.conname AS constraint_name, source_att.attname AS column_name, \
+                    referenced.relname AS referenced_table, referenced_att.attname AS referenced_column, \
+                    key_position.position AS ordinal_position \
+             FROM pg_catalog.pg_constraint con \
+             JOIN pg_catalog.pg_class source_table ON source_table.oid = con.conrelid \
+             JOIN pg_catalog.pg_namespace source_schema ON source_schema.oid = source_table.relnamespace \
+             JOIN pg_catalog.pg_class referenced ON referenced.oid = con.confrelid \
+             JOIN LATERAL generate_subscripts(con.conkey, 1) AS key_position(position) ON true \
+             JOIN pg_catalog.pg_attribute source_att \
+               ON source_att.attrelid = source_table.oid AND source_att.attnum = con.conkey[key_position.position] \
+             JOIN pg_catalog.pg_attribute referenced_att \
+               ON referenced_att.attrelid = referenced.oid AND referenced_att.attnum = con.confkey[key_position.position] \
+             WHERE con.contype = 'f' AND source_schema.nspname = $1 AND source_table.relname = $2 \
+             ORDER BY con.conname, key_position.position",
         )
         .bind(schema)
         .bind(object)
@@ -512,27 +522,24 @@ impl Connection for PostgresConnection {
         .await
         .map_err(|e| DriverError::Introspect(e.to_string()))?;
 
-        let mut foreign_keys: Vec<ForeignKeySchema> = Vec::new();
+        let mut foreign_key_columns = Vec::with_capacity(fk_rows.len());
         for row in fk_rows {
             let name: String = row.try_get("constraint_name").unwrap_or_default();
+            let position: i32 = row.try_get("ordinal_position").unwrap_or(0);
             let column: String = row.try_get("column_name").unwrap_or_default();
             let ref_table: String = row.try_get("referenced_table").unwrap_or_default();
             let ref_column: String = row.try_get("referenced_column").unwrap_or_default();
-            match foreign_keys.iter_mut().find(|f| f.name == name) {
-                Some(existing) => {
-                    existing.columns.push(column);
-                    existing.referenced_columns.push(ref_column);
-                }
-                None => foreign_keys.push(ForeignKeySchema {
-                    name,
-                    columns: vec![column],
-                    referenced_table: ref_table,
-                    referenced_columns: vec![ref_column],
-                }),
-            }
+            foreign_key_columns.push((name, position, column, ref_table, ref_column));
         }
+        let foreign_keys = assemble_foreign_key_columns(foreign_key_columns);
 
-        Ok(build_object_schema(object, kind, columns, indexes, foreign_keys))
+        Ok(build_object_schema(
+            object,
+            kind,
+            columns,
+            indexes,
+            foreign_keys,
+        ))
     }
 
     /// One query instead of N: the whole schema's columns at once.
@@ -571,7 +578,8 @@ impl Connection for PostgresConnection {
     }
 
     async fn execute(&self, request: QueryRequest) -> Result<QueryResponse> {
-        self.execute_cancellable(request, CancellationToken::new()).await
+        self.execute_cancellable(request, CancellationToken::new())
+            .await
     }
 
     async fn execute_cancellable(
@@ -677,7 +685,73 @@ impl PostgresConnection {
     }
 }
 
-async fn run_statement(conn: &mut sqlx::postgres::PgConnection, sql: &str, max_rows: usize) -> StatementResult {
+fn assemble_foreign_key_columns(
+    mut columns: Vec<(String, i32, String, String, String)>,
+) -> Vec<ForeignKeySchema> {
+    columns.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    let mut foreign_keys: Vec<ForeignKeySchema> = Vec::new();
+    for (name, _, column, referenced_table, referenced_column) in columns {
+        match foreign_keys.iter_mut().find(|fk| fk.name == name) {
+            Some(foreign_key) => {
+                foreign_key.columns.push(column);
+                foreign_key.referenced_columns.push(referenced_column);
+            }
+            None => foreign_keys.push(ForeignKeySchema {
+                name,
+                columns: vec![column],
+                referenced_table,
+                referenced_columns: vec![referenced_column],
+            }),
+        }
+    }
+    foreign_keys
+}
+
+#[cfg(test)]
+mod foreign_key_tests {
+    use super::assemble_foreign_key_columns;
+
+    #[test]
+    fn composite_foreign_key_columns_keep_catalog_key_order() {
+        let foreign_keys = assemble_foreign_key_columns(vec![
+            (
+                "fk_pair".into(),
+                2,
+                "source_b".into(),
+                "target".into(),
+                "target_b".into(),
+            ),
+            (
+                "fk_pair".into(),
+                1,
+                "source_a".into(),
+                "target".into(),
+                "target_a".into(),
+            ),
+            (
+                "fk_other".into(),
+                1,
+                "other_id".into(),
+                "other".into(),
+                "id".into(),
+            ),
+        ]);
+
+        assert_eq!(foreign_keys.len(), 2);
+        assert_eq!(foreign_keys[0].columns, vec!["other_id"]);
+        assert_eq!(foreign_keys[1].columns, vec!["source_a", "source_b"]);
+        assert_eq!(
+            foreign_keys[1].referenced_columns,
+            vec!["target_a", "target_b"]
+        );
+    }
+}
+
+async fn run_statement(
+    conn: &mut sqlx::postgres::PgConnection,
+    sql: &str,
+    max_rows: usize,
+) -> StatementResult {
     let started = Instant::now();
     let mut result = StatementResult {
         statement: sql.to_string(),

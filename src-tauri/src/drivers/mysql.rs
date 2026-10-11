@@ -23,14 +23,16 @@ use sqlx::types::BigDecimal;
 use sqlx::{Column, Executor, Row, TypeInfo, ValueRef};
 use tokio_util::sync::CancellationToken;
 
-use super::{build_object_schema, object_kind_from_marker, relational_actions, Connection, DatabaseDriver};
+use super::{
+    build_object_schema, object_kind_from_marker, relational_actions, Connection, DatabaseDriver,
+};
 use crate::ddl::Dialect;
 use crate::error::{DriverError, Result};
 use crate::models::{
     ColumnMeta, ColumnSchema, ConfigField, ConnectionConfig, DatabaseInfo, DatabaseObject,
     DriverCapabilities, FieldType, ForeignKeySchema, IndexSchema, NamespaceInfo, ObjectKind,
-    ObjectSchema, QueryLanguage, QueryRequest, QueryResponse, ResultShape, SelectOption, ServerInfo,
-    SslMode, StatementResult, TableColumns,
+    ObjectSchema, QueryLanguage, QueryRequest, QueryResponse, ResultShape, SelectOption,
+    ServerInfo, SslMode, StatementResult, TableColumns,
 };
 use crate::sql_split::split_statements;
 
@@ -61,7 +63,17 @@ fn capabilities() -> DriverCapabilities {
         supports_ddl: true,
         supports_explain: true,
         supports_cancel: true,
-        object_kinds: vec![ObjectKind::Table, ObjectKind::View],
+        // `information_schema.TABLES` gives the tables and views; a second pass
+        // over TRIGGERS/ROUTINES/EVENTS adds the routines, triggers and events,
+        // so all six kinds appear in the explorer.
+        object_kinds: vec![
+            ObjectKind::Table,
+            ObjectKind::View,
+            ObjectKind::Function,
+            ObjectKind::Procedure,
+            ObjectKind::Trigger,
+            ObjectKind::Event,
+        ],
         supported_actions: relational_actions(),
     }
 }
@@ -216,6 +228,10 @@ impl DatabaseDriver for MySqlDriver {
         config_fields()
     }
 
+    fn dialect(&self) -> Dialect {
+        Dialect::MySql
+    }
+
     async fn test(&self, config: &ConnectionConfig) -> Result<ServerInfo> {
         let pool = pool_for(config, 1).await?;
         let info = fetch_server_info(&pool).await;
@@ -227,6 +243,7 @@ impl DatabaseDriver for MySqlDriver {
         let pool = pool_for(config, 5).await?;
         let info = fetch_server_info(&pool).await?;
         Ok(Arc::new(MySqlConnection {
+            driver: MySqlDriver::new(),
             pool,
             other_pools: Mutex::new(HashMap::new()),
             config: config.clone(),
@@ -282,6 +299,11 @@ async fn fetch_server_info(pool: &MySqlPool) -> Result<ServerInfo> {
 }
 
 pub struct MySqlConnection {
+    /// The driver this connection was opened by. [`MySqlDriver`] is a stateless
+    /// declaration, so the connection carries it and answers what the engine
+    /// says about itself (its id, capabilities, dialect and plan statement)
+    /// from here instead of repeating it.
+    driver: MySqlDriver,
     /// Pool bound to the database named in the connection config.
     pool: MySqlPool,
     /// Pools created on demand when the user targets a different database.
@@ -298,20 +320,12 @@ pub struct MySqlConnection {
 
 #[async_trait]
 impl Connection for MySqlConnection {
-    fn driver_id(&self) -> &'static str {
-        "mysql"
+    fn driver(&self) -> &dyn DatabaseDriver {
+        &self.driver
     }
 
     fn server_info(&self) -> &ServerInfo {
         &self.info
-    }
-
-    fn capabilities(&self) -> DriverCapabilities {
-        capabilities()
-    }
-
-    fn dialect(&self) -> Dialect {
-        Dialect::MySql
     }
 
     async fn ping(&self) -> Result<()> {
@@ -323,10 +337,11 @@ impl Connection for MySqlConnection {
     }
 
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
-        let rows = sqlx::query("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| DriverError::Introspect(e.to_string()))?;
+        let rows =
+            sqlx::query("SELECT SCHEMA_NAME FROM information_schema.SCHEMATA ORDER BY SCHEMA_NAME")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| DriverError::Introspect(e.to_string()))?;
         Ok(rows
             .into_iter()
             .map(|row| {
@@ -431,7 +446,8 @@ impl Connection for MySqlConnection {
         let columns: Vec<ColumnSchema> = column_rows
             .into_iter()
             .map(|row| {
-                let is_nullable: String = row.try_get("IS_NULLABLE").unwrap_or_else(|_| "YES".into());
+                let is_nullable: String =
+                    row.try_get("IS_NULLABLE").unwrap_or_else(|_| "YES".into());
                 let extra: String = row.try_get("EXTRA").unwrap_or_default();
                 let key: String = row.try_get("COLUMN_KEY").unwrap_or_default();
                 let comment: Option<String> = row.try_get("COLUMN_COMMENT").ok();
@@ -506,7 +522,13 @@ impl Connection for MySqlConnection {
             }
         }
 
-        Ok(build_object_schema(object, kind, columns, indexes, foreign_keys))
+        Ok(build_object_schema(
+            object,
+            kind,
+            columns,
+            indexes,
+            foreign_keys,
+        ))
     }
 
     /// One query instead of N: the whole schema's columns at once.
@@ -544,7 +566,8 @@ impl Connection for MySqlConnection {
     }
 
     async fn execute(&self, request: QueryRequest) -> Result<QueryResponse> {
-        self.execute_cancellable(request, CancellationToken::new()).await
+        self.execute_cancellable(request, CancellationToken::new())
+            .await
     }
 
     async fn execute_cancellable(
@@ -635,10 +658,7 @@ impl MySqlConnection {
         let pool = pool_for(&config, 5).await?;
 
         let mut pools = self.other_pools.lock().unwrap();
-        Ok(pools
-            .entry(database.to_string())
-            .or_insert(pool)
-            .clone())
+        Ok(pools.entry(database.to_string()).or_insert(pool).clone())
     }
 
     async fn object_kind(&self, database: &str, object: &str) -> Result<ObjectKind> {
@@ -659,7 +679,11 @@ impl MySqlConnection {
     }
 }
 
-async fn run_statement(conn: &mut sqlx::mysql::MySqlConnection, sql: &str, max_rows: usize) -> StatementResult {
+async fn run_statement(
+    conn: &mut sqlx::mysql::MySqlConnection,
+    sql: &str,
+    max_rows: usize,
+) -> StatementResult {
     let started = Instant::now();
     let mut result = StatementResult {
         statement: sql.to_string(),
@@ -891,7 +915,10 @@ mod integration {
             .or_else(|| info.current_database.clone())
             .unwrap_or_else(|| databases[0].name.clone());
 
-        let objects = connection.list_objects(&database, None).await.expect("list objects");
+        let objects = connection
+            .list_objects(&database, None)
+            .await
+            .expect("list objects");
         if let Some(table) = objects.iter().find(|o| o.kind == ObjectKind::Table) {
             let schema = connection
                 .describe_object(&database, None, &table.name)

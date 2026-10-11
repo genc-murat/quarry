@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog } from "@/components/ui/dialog";
 import { Input, Label, Select } from "@/components/ui/input";
-import { qualifiedName, quoteIdentifier, type ObjectRef } from "@/lib/objects";
+import { qualifiedName, quoteIdentifier, type ObjectRef, type SqlDialect } from "@/lib/objects";
 import type { IndexDefinition, IndexKind, ObjectDetail } from "@/lib/types";
 
 interface Props {
@@ -13,11 +13,12 @@ interface Props {
   onClose: () => void;
   objectRef: ObjectRef;
   detail: ObjectDetail;
+  dialect: SqlDialect;
   busy?: boolean;
   onRun: (index: IndexDefinition) => void;
 }
 
-export function IndexDialog({ open, onClose, objectRef, detail, busy, onRun }: Props) {
+export function IndexDialog({ open, onClose, objectRef, detail, dialect, busy, onRun }: Props) {
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
   const [unique, setUnique] = useState(false);
@@ -67,7 +68,11 @@ export function IndexDialog({ open, onClose, objectRef, detail, busy, onRun }: P
       open={open}
       onClose={onClose}
       title={`Create index on ${objectRef.object}`}
-      description="Pick the columns in index order. PostgreSQL may reorder per its own rules."
+      description={
+        dialect === "sqlite"
+          ? "Pick the columns in index order. SQLite supports B-tree indexes only."
+          : "Pick the columns in index order. PostgreSQL may reorder per its own rules."
+      }
       footer={
         <>
           <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
@@ -161,8 +166,8 @@ export function IndexDialog({ open, onClose, objectRef, detail, busy, onRun }: P
               onChange={(event) => setKind(event.target.value as IndexKind)}
             >
               <option value="btree">BTREE</option>
-              <option value="hash">HASH</option>
-              <option value="fullText">FULLTEXT</option>
+              {dialect === "sqlite" ? null : <option value="hash">HASH</option>}
+              {dialect === "sqlite" ? null : <option value="fullText">FULLTEXT</option>}
             </Select>
           </div>
         </div>

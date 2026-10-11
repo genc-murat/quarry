@@ -118,9 +118,13 @@ export function ConnectionDialog({ open, onClose, editing }: Props) {
     if (!driver) return;
     setSaving(true);
     const payload = buildPayload();
+    // Server drivers default to `user@host`; file-backed ones to their path.
+    const defaultName = payload.username
+      ? `${payload.username}@${payload.host}`
+      : String(values.path ?? driver.displayName);
     const profile = await saveConnection({
       id: editing?.id ?? null,
-      name: name.trim() || `${payload.username}@${payload.host}`,
+      name: name.trim() || defaultName,
       driver: driver.id,
       ...payload,
       // `""` tells the backend to delete the stored secret, `undefined` means

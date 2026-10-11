@@ -5,7 +5,7 @@ import { ExportDialog } from "@/components/objects/ExportDialog";
 import { IndexDialog } from "@/components/objects/IndexDialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { PromptDialog } from "@/components/ui/prompt-dialog";
-import { objectKey, quoteIdentifier } from "@/lib/objects";
+import { dialectForDriver, objectKey, quoteIdentifier } from "@/lib/objects";
 import type { ObjectActionRequest } from "@/lib/types";
 import { useWorkspace } from "@/stores/workspace";
 
@@ -19,6 +19,7 @@ export function ObjectDialogHost() {
   const cache = useWorkspace((s) => s.objectCache);
   const loadObjectDetail = useWorkspace((s) => s.loadObjectDetail);
   const runObjectAction = useWorkspace((s) => s.runObjectAction);
+  const sessions = useWorkspace((s) => s.sessions);
   const requireTypedConfirmation = useWorkspace((s) => s.settings.general.requireTypedConfirmation);
   const [busy, setBusy] = useState(false);
 
@@ -34,6 +35,7 @@ export function ObjectDialogHost() {
   if (!dialog || !ref) return null;
 
   const quote = detail?.identifierQuote ?? '"';
+  const dialect = dialectForDriver(sessions.find((s) => s.id === ref.sessionId)?.driver);
 
   const base: Pick<
     ObjectActionRequest,
@@ -61,6 +63,7 @@ export function ObjectDialogHost() {
           open
           objectRef={ref}
           detail={detail}
+          dialect={dialect}
           busy={busy}
           onClose={close}
           onRun={(index) => run({ ...base, action: "createIndex", index })}
@@ -74,6 +77,7 @@ export function ObjectDialogHost() {
           mode="add"
           objectRef={ref}
           detail={detail}
+          dialect={dialect}
           busy={busy}
           onClose={close}
           onRun={(column) => run({ ...base, action: "addColumn", column })}
@@ -88,6 +92,7 @@ export function ObjectDialogHost() {
           objectRef={ref}
           detail={detail}
           initial={dialog.column}
+          dialect={dialect}
           busy={busy}
           onClose={close}
           onRun={(column, renameTo) =>

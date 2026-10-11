@@ -10,6 +10,7 @@ import { TitleBar } from "@/components/layout/TitleBar";
 import { QueryTabs } from "@/components/query/QueryTabs";
 import { QueryWorkspace } from "@/components/query/QueryWorkspace";
 import { SettingsPanel } from "@/components/settings/SettingsPanel";
+import { SchemaToolsPanel } from "@/components/schema/SchemaToolsPanel";
 import { SnippetPanel } from "@/components/snippets/SnippetPanel";
 import { Toaster } from "@/components/ui/toaster";
 import { applyAppearance } from "@/lib/settings";
@@ -52,6 +53,7 @@ export default function App() {
         <aside className="w-72 shrink-0 overflow-hidden border-r border-border bg-surface/40">
           {sidebar === "connections" ? <ConnectionList /> : null}
           {sidebar === "explorer" ? <ExplorerPanel /> : null}
+          {sidebar === "schema" ? <SchemaToolsPanel /> : null}
           {sidebar === "history" ? <HistoryPanel /> : null}
           {sidebar === "snippets" ? <SnippetPanel /> : null}
           {sidebar === "settings" ? <SettingsPanel /> : null}

@@ -1,0 +1,630 @@
+[
+  {
+    "id": "clickhouse",
+    "displayName": "ClickHouse",
+    "defaultPort": 8123,
+    "accentColor": "#FFCC01",
+    "capabilities": {
+      "queryLanguage": "sql",
+      "resultShape": "tabular",
+      "isRelational": true,
+      "supportsMultipleDatabases": true,
+      "supportsSchemas": false,
+      "supportsTransactions": false,
+      "supportsDdl": true,
+      "supportsExplain": true,
+      "supportsCancel": false,
+      "objectKinds": [
+        "table",
+        "view",
+        "materializedView"
+      ],
+      "supportedActions": [
+        "inspect",
+        "viewData",
+        "countRows",
+        "copyName"
+      ]
+    },
+    "configFields": [
+      {
+        "key": "host",
+        "label": "Host",
+        "fieldType": "text",
+        "placeholder": "127.0.0.1",
+        "required": true,
+        "defaultValue": "127.0.0.1",
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "port",
+        "label": "HTTP port",
+        "fieldType": "number",
+        "placeholder": "8123",
+        "required": true,
+        "defaultValue": 8123,
+        "options": [],
+        "help": "The HTTP interface port (8123 by default)."
+      },
+      {
+        "key": "username",
+        "label": "Username",
+        "fieldType": "text",
+        "placeholder": "default",
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "password",
+        "label": "Password",
+        "fieldType": "password",
+        "placeholder": "••••••••",
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "sslMode",
+        "label": "Transport security",
+        "fieldType": "select",
+        "placeholder": null,
+        "required": true,
+        "defaultValue": "disabled",
+        "options": [
+          {
+            "value": "disabled",
+            "label": "HTTP (no TLS)"
+          },
+          {
+            "value": "required",
+            "label": "HTTPS (TLS required)"
+          }
+        ],
+        "help": "TLS requires a ClickHouse HTTPS endpoint (commonly port 8443). Certificate validation is enabled."
+      },
+      {
+        "key": "database",
+        "label": "Database",
+        "fieldType": "text",
+        "placeholder": "default",
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": "Optional default database for statements that do not name one."
+      }
+    ],
+    "identifierQuote": "\"",
+    "explainSelect": "EXPLAIN indexes = 1 SELECT 1"
+  },
+  {
+    "id": "mongodb",
+    "displayName": "MongoDB",
+    "defaultPort": 27017,
+    "accentColor": "#47A248",
+    "capabilities": {
+      "queryLanguage": "mongo",
+      "resultShape": "document",
+      "isRelational": false,
+      "supportsMultipleDatabases": true,
+      "supportsSchemas": false,
+      "supportsTransactions": false,
+      "supportsDdl": false,
+      "supportsExplain": false,
+      "supportsCancel": false,
+      "objectKinds": [
+        "collection",
+        "view"
+      ],
+      "supportedActions": [
+        "inspect",
+        "viewData",
+        "countRows",
+        "copyName"
+      ]
+    },
+    "configFields": [
+      {
+        "key": "host",
+        "label": "Host",
+        "fieldType": "text",
+        "placeholder": "127.0.0.1",
+        "required": true,
+        "defaultValue": "127.0.0.1",
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "port",
+        "label": "Port",
+        "fieldType": "number",
+        "placeholder": "27017",
+        "required": true,
+        "defaultValue": 27017,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "username",
+        "label": "Username",
+        "fieldType": "text",
+        "placeholder": "app",
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": "Optional. Authenticates against the database below, or admin when it is empty."
+      },
+      {
+        "key": "password",
+        "label": "Password",
+        "fieldType": "password",
+        "placeholder": "••••••••",
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "database",
+        "label": "Database",
+        "fieldType": "text",
+        "placeholder": "app",
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": "Optional default database for commands that do not name one."
+      },
+      {
+        "key": "sslMode",
+        "label": "TLS",
+        "fieldType": "select",
+        "placeholder": null,
+        "required": false,
+        "defaultValue": "disabled",
+        "options": [
+          {
+            "value": "disabled",
+            "label": "Disabled"
+          },
+          {
+            "value": "required",
+            "label": "Required"
+          }
+        ],
+        "help": "Required connects with TLS using the system certificate store."
+      }
+    ],
+    "identifierQuote": "\"",
+    "explainSelect": null
+  },
+  {
+    "id": "mysql",
+    "displayName": "MySQL",
+    "defaultPort": 3306,
+    "accentColor": "#0EA5B7",
+    "capabilities": {
+      "queryLanguage": "sql",
+      "resultShape": "tabular",
+      "isRelational": true,
+      "supportsMultipleDatabases": true,
+      "supportsSchemas": false,
+      "supportsTransactions": true,
+      "supportsDdl": true,
+      "supportsExplain": true,
+      "supportsCancel": true,
+      "objectKinds": [
+        "table",
+        "view",
+        "function",
+        "procedure",
+        "trigger",
+        "event"
+      ],
+      "supportedActions": [
+        "inspect",
+        "viewData",
+        "countRows",
+        "copyName",
+        "copyQualifiedName",
+        "copyDdl",
+        "generateDdl",
+        "templateSelect",
+        "templateInsert",
+        "templateUpdate",
+        "templateDelete",
+        "exportData",
+        "renameObject",
+        "duplicateObject",
+        "dropObject",
+        "truncate",
+        "maintenance",
+        "createIndex",
+        "dropIndex",
+        "addColumn",
+        "alterColumn",
+        "dropColumn"
+      ]
+    },
+    "configFields": [
+      {
+        "key": "host",
+        "label": "Host",
+        "fieldType": "text",
+        "placeholder": "127.0.0.1",
+        "required": true,
+        "defaultValue": "127.0.0.1",
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "port",
+        "label": "Port",
+        "fieldType": "number",
+        "placeholder": "3306",
+        "required": true,
+        "defaultValue": 3306,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "username",
+        "label": "Username",
+        "fieldType": "text",
+        "placeholder": "root",
+        "required": true,
+        "defaultValue": "root",
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "password",
+        "label": "Password",
+        "fieldType": "password",
+        "placeholder": "••••••••",
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "database",
+        "label": "Database",
+        "fieldType": "text",
+        "placeholder": "optional",
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": "Leave empty to browse every schema."
+      },
+      {
+        "key": "sslMode",
+        "label": "TLS",
+        "fieldType": "select",
+        "placeholder": null,
+        "required": false,
+        "defaultValue": "preferred",
+        "options": [
+          {
+            "value": "preferred",
+            "label": "Preferred"
+          },
+          {
+            "value": "required",
+            "label": "Required"
+          },
+          {
+            "value": "disabled",
+            "label": "Disabled (MySQL < 5.6.46)"
+          }
+        ],
+        "help": "Disable TLS for servers older than MySQL 5.6.46."
+      }
+    ],
+    "identifierQuote": "`",
+    "explainSelect": "EXPLAIN SELECT 1"
+  },
+  {
+    "id": "postgres",
+    "displayName": "PostgreSQL",
+    "defaultPort": 5432,
+    "accentColor": "#3B82F6",
+    "capabilities": {
+      "queryLanguage": "sql",
+      "resultShape": "tabular",
+      "isRelational": true,
+      "supportsMultipleDatabases": true,
+      "supportsSchemas": true,
+      "supportsTransactions": true,
+      "supportsDdl": true,
+      "supportsExplain": true,
+      "supportsCancel": true,
+      "objectKinds": [
+        "table",
+        "view",
+        "materializedView",
+        "sequence"
+      ],
+      "supportedActions": [
+        "inspect",
+        "viewData",
+        "countRows",
+        "copyName",
+        "copyQualifiedName",
+        "copyDdl",
+        "generateDdl",
+        "templateSelect",
+        "templateInsert",
+        "templateUpdate",
+        "templateDelete",
+        "exportData",
+        "renameObject",
+        "duplicateObject",
+        "dropObject",
+        "truncate",
+        "maintenance",
+        "createIndex",
+        "dropIndex",
+        "addColumn",
+        "alterColumn",
+        "dropColumn",
+        "reindex"
+      ]
+    },
+    "configFields": [
+      {
+        "key": "host",
+        "label": "Host",
+        "fieldType": "text",
+        "placeholder": "127.0.0.1",
+        "required": true,
+        "defaultValue": "127.0.0.1",
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "port",
+        "label": "Port",
+        "fieldType": "number",
+        "placeholder": "5432",
+        "required": true,
+        "defaultValue": 5432,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "username",
+        "label": "Username",
+        "fieldType": "text",
+        "placeholder": "postgres",
+        "required": true,
+        "defaultValue": "postgres",
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "password",
+        "label": "Password",
+        "fieldType": "password",
+        "placeholder": "••••••••",
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "database",
+        "label": "Database",
+        "fieldType": "text",
+        "placeholder": "postgres",
+        "required": true,
+        "defaultValue": "postgres",
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "sslMode",
+        "label": "TLS",
+        "fieldType": "select",
+        "placeholder": null,
+        "required": false,
+        "defaultValue": "preferred",
+        "options": [
+          {
+            "value": "preferred",
+            "label": "Preferred"
+          },
+          {
+            "value": "required",
+            "label": "Required"
+          },
+          {
+            "value": "disabled",
+            "label": "Disabled"
+          }
+        ],
+        "help": null
+      }
+    ],
+    "identifierQuote": "\"",
+    "explainSelect": "EXPLAIN SELECT 1"
+  },
+  {
+    "id": "redis",
+    "displayName": "Redis",
+    "defaultPort": 6379,
+    "accentColor": "#DC382D",
+    "capabilities": {
+      "queryLanguage": "redis",
+      "resultShape": "keyValue",
+      "isRelational": false,
+      "supportsMultipleDatabases": false,
+      "supportsSchemas": false,
+      "supportsTransactions": false,
+      "supportsDdl": false,
+      "supportsExplain": false,
+      "supportsCancel": false,
+      "objectKinds": [
+        "key"
+      ],
+      "supportedActions": [
+        "inspect"
+      ]
+    },
+    "configFields": [
+      {
+        "key": "host",
+        "label": "Host",
+        "fieldType": "text",
+        "placeholder": "127.0.0.1",
+        "required": true,
+        "defaultValue": "127.0.0.1",
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "port",
+        "label": "Port",
+        "fieldType": "number",
+        "placeholder": "6379",
+        "required": true,
+        "defaultValue": 6379,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "username",
+        "label": "Username",
+        "fieldType": "text",
+        "placeholder": "default",
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": "Optional. Only ACL users (Redis 6+) need a username."
+      },
+      {
+        "key": "password",
+        "label": "Password",
+        "fieldType": "password",
+        "placeholder": "••••••••",
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "database",
+        "label": "Database",
+        "fieldType": "number",
+        "placeholder": "0",
+        "required": false,
+        "defaultValue": 0,
+        "options": [],
+        "help": "Redis database index (0–15 by default)."
+      },
+      {
+        "key": "sslMode",
+        "label": "TLS",
+        "fieldType": "select",
+        "placeholder": null,
+        "required": false,
+        "defaultValue": "disabled",
+        "options": [
+          {
+            "value": "disabled",
+            "label": "Disabled"
+          },
+          {
+            "value": "required",
+            "label": "Required (rediss)"
+          }
+        ],
+        "help": "Required connects over TLS using the system certificate store."
+      }
+    ],
+    "identifierQuote": "\"",
+    "explainSelect": null
+  },
+  {
+    "id": "sqlite",
+    "displayName": "SQLite",
+    "defaultPort": 0,
+    "accentColor": "#003B57",
+    "capabilities": {
+      "queryLanguage": "sql",
+      "resultShape": "tabular",
+      "isRelational": true,
+      "supportsMultipleDatabases": false,
+      "supportsSchemas": false,
+      "supportsTransactions": true,
+      "supportsDdl": true,
+      "supportsExplain": true,
+      "supportsCancel": false,
+      "objectKinds": [
+        "table",
+        "view",
+        "trigger"
+      ],
+      "supportedActions": [
+        "inspect",
+        "viewData",
+        "countRows",
+        "copyName",
+        "copyQualifiedName",
+        "copyDdl",
+        "generateDdl",
+        "templateSelect",
+        "templateInsert",
+        "templateUpdate",
+        "templateDelete",
+        "exportData",
+        "renameObject",
+        "duplicateObject",
+        "dropObject",
+        "truncate",
+        "maintenance",
+        "createIndex",
+        "dropIndex",
+        "addColumn",
+        "alterColumn",
+        "dropColumn",
+        "reindex"
+      ]
+    },
+    "configFields": [
+      {
+        "key": "path",
+        "label": "Database file",
+        "fieldType": "text",
+        "placeholder": "/Users/me/data/shop.db",
+        "required": true,
+        "defaultValue": null,
+        "options": [],
+        "help": "Path to the SQLite file. Use :memory: for a scratch database."
+      },
+      {
+        "key": "createIfMissing",
+        "label": "Create if missing",
+        "fieldType": "select",
+        "placeholder": null,
+        "required": false,
+        "defaultValue": "true",
+        "options": [
+          {
+            "value": "true",
+            "label": "Yes — create the file"
+          },
+          {
+            "value": "false",
+            "label": "No — open an existing file only"
+          }
+        ],
+        "help": null
+      }
+    ],
+    "identifierQuote": "\"",
+    "explainSelect": "EXPLAIN QUERY PLAN SELECT 1"
+  }
+]

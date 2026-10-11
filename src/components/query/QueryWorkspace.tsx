@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
-import { MySQL, PostgreSQL, StandardSQL, sql, type SQLNamespace } from "@codemirror/lang-sql";
+import { MySQL, PostgreSQL, SQLite, StandardSQL, sql, type SQLNamespace } from "@codemirror/lang-sql";
 import { indentUnit } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { EditorView } from "@codemirror/view";
-import { Bookmark, ListTree, Play, Square, Terminal } from "lucide-react";
+import { Bookmark, ListTree, Play, Square, Star, Terminal } from "lucide-react";
 
 import { ObjectInspector } from "@/components/objects/ObjectInspector";
 import { PlanPanel } from "@/components/query/PlanPanel";
@@ -27,9 +27,12 @@ export function QueryWorkspace() {
   const explainTab = useWorkspace((s) => s.explainTab);
   const cancelTab = useWorkspace((s) => s.cancelTab);
   const saveSnippet = useWorkspace((s) => s.saveSnippet);
+  const toggleFavorite = useWorkspace((s) => s.toggleFavorite);
+  const favorites = useWorkspace((s) => s.favorites);
   const saveRowChanges = useWorkspace((s) => s.saveRowChanges);
   const pageObjectData = useWorkspace((s) => s.pageObjectData);
   const sessions = useWorkspace((s) => s.sessions);
+  const drivers = useWorkspace((s) => s.drivers);
   const databasesBySession = useWorkspace((s) => s.databasesBySession);
   const mode = useThemeStore((s) => s.mode);
   const editor = useWorkspace((s) => s.settings.editor);
@@ -98,21 +101,31 @@ export function QueryWorkspace() {
         return MySQL;
       case "postgres":
         return PostgreSQL;
+      case "sqlite":
+        return SQLite;
       default:
         return StandardSQL;
     }
   }, [session?.driver]);
 
+  const capabilities = drivers.find((d) => d.id === session?.driver)?.capabilities;
+  // Non-SQL engines (Redis) get a plain editor: a SQL dialect would offer
+  // meaningless keyword completion and highlighting.
+  const usesSql = (capabilities?.queryLanguage ?? "sql") === "sql";
+  // An engine with no planner (Redis) must not be offered the action at all —
+  // otherwise every click just fails with "this driver cannot explain queries".
+  const supportsExplain = capabilities?.supportsExplain ?? true;
+
   // Editor settings are extensions rather than props, so they are rebuilt when
   // any of them changes.
   const extensions = useMemo(
     () => [
-      sql({ dialect, schema }),
+      ...(usesSql ? [sql({ dialect, schema })] : []),
       ...(editor.wordWrap ? [EditorView.lineWrapping] : []),
       EditorState.tabSize.of(Number(editor.tabSize)),
       indentUnit.of(" ".repeat(Number(editor.tabSize))),
     ],
-    [dialect, schema, editor.wordWrap, editor.tabSize],
+    [usesSql, dialect, schema, editor.wordWrap, editor.tabSize],
   );
 
   function startDrag() {
@@ -183,15 +196,28 @@ export function QueryWorkspace() {
           </Button>
         )}
 
+        {supportsExplain ? (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => explainTab(tab.id)}
+            disabled={!session || tab.running || tab.explaining}
+            title="Explain (⌘/Ctrl + Shift + Enter)"
+          >
+            <ListTree className="h-3.5 w-3.5" />
+            Explain
+          </Button>
+        ) : null}
+
         <Button
           size="sm"
-          variant="outline"
-          onClick={() => explainTab(tab.id)}
-          disabled={!session || tab.running || tab.explaining}
-          title="Explain (⌘/Ctrl + Shift + Enter)"
+          variant="ghost"
+          onClick={() => toggleFavorite(tab.id)}
+          disabled={!tab.sql.trim()}
+          title={favorites.some((favorite) => favorite.sql === tab.sql.trim() && favorite.sessionId === tab.sessionId && favorite.database === tab.database) ? "Remove favorite" : "Add to favorites"}
         >
-          <ListTree className="h-3.5 w-3.5" />
-          Explain
+          <Star className={`h-3.5 w-3.5 ${favorites.some((favorite) => favorite.sql === tab.sql.trim() && favorite.sessionId === tab.sessionId && favorite.database === tab.database) ? "fill-warning text-warning" : ""}`} />
+          Favorite
         </Button>
 
         <Button
@@ -258,7 +284,7 @@ export function QueryWorkspace() {
             event.preventDefault();
             if (tab.running) {
               void cancelTab(tab.id);
-            } else if (event.shiftKey) {
+            } else if (event.shiftKey && supportsExplain) {
               void explainTab(tab.id);
             } else {
               void runTab(tab.id);

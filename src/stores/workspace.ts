@@ -11,6 +11,7 @@ import type {
   ObjectActionRequest,
   ObjectDetail,
   OpenSessionRequest,
+  QueryLanguage,
   QueryResponse,
   RowChangeRequest,
   SaveConnectionInput,
@@ -37,8 +38,31 @@ import {
 import { useThemeStore } from "@/stores/theme";
 import type { PaletteId, ThemeMode } from "@/theme/themes";
 
-/** `SELECT *` preview for one page of a table, quoting the identifier. */
-function previewSql(ref: ObjectRef, quote: string, offset: number, limit: number): string {
+/** Query language of the driver behind a session; SQL when it is unknown. */
+function queryLanguageFor(
+  drivers: DriverDescriptor[],
+  sessions: SessionInfo[],
+  sessionId: string,
+): QueryLanguage {
+  const driverId = sessions.find((s) => s.id === sessionId)?.driver;
+  return drivers.find((d) => d.id === driverId)?.capabilities.queryLanguage ?? "sql";
+}
+
+/**
+ * One page of a collection or table, as a statement the driver understands.
+ * SQL gets a quoted `SELECT *`; MongoDB gets a sorted `find` command, so the
+ * page order is stable across `skip` windows.
+ */
+function previewSql(
+  ref: ObjectRef,
+  quote: string,
+  offset: number,
+  limit: number,
+  language: QueryLanguage,
+): string {
+  if (language === "mongo") {
+    return JSON.stringify({ find: ref.object, filter: {}, sort: { _id: 1 }, skip: offset, limit });
+  }
   const table = qualifiedName(
     { database: ref.database, namespace: ref.namespace, object: ref.object },
     quote,
@@ -46,7 +70,7 @@ function previewSql(ref: ObjectRef, quote: string, offset: number, limit: number
   return `SELECT * FROM ${table} LIMIT ${limit} OFFSET ${offset};`;
 }
 
-export type SidebarView = "connections" | "explorer" | "history" | "snippets" | "settings";
+export type SidebarView = "connections" | "explorer" | "schema" | "history" | "snippets" | "settings";
 
 export interface QueryTab {
   id: string;
@@ -56,7 +80,7 @@ export interface QueryTab {
   sql: string;
   sessionId: string | null;
   database: string | null;
-  /** Set for `object` tabs: which table/view is being inspected. */
+  /** Set for `object` tabs and data previews: which object is shown. */
   objectRef: ObjectRef | null;
   /** Set for editable table previews (grid row editing). */
   editSource: EditSource | null;
@@ -88,6 +112,30 @@ export interface HistoryEntry {
   rowCount: number;
 }
 
+export interface QueryFavorite {
+  id: string;
+  sql: string;
+  sessionId: string | null;
+  sessionName: string;
+  database: string | null;
+  name: string;
+  createdAt: number;
+}
+
+function loadLocalList<T>(key: string): T[] {
+  if (typeof localStorage === "undefined") return [];
+  try {
+    const value: unknown = JSON.parse(localStorage.getItem(key) ?? "[]");
+    return Array.isArray(value) ? value as T[] : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalList<T>(key: string, value: T[]) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* keep the in-memory workspace available */ }
+}
+
 export interface Toast {
   id: string;
   title: string;
@@ -109,6 +157,7 @@ interface WorkspaceState {
   tabs: QueryTab[];
   activeTabId: string | null;
   history: HistoryEntry[];
+  favorites: QueryFavorite[];
   snippets: Snippet[];
   /** Cached object inspector payloads, keyed by `objectKey`. */
   objectCache: Record<string, ObjectDetail>;
@@ -150,6 +199,8 @@ interface WorkspaceState {
   openObjectData: (ref: ObjectRef) => Promise<void>;
   openObjectTemplate: (ref: ObjectRef, kind: TemplateKind) => Promise<void>;
   clearHistory: () => void;
+  toggleFavorite: (tabId: string, name?: string) => void;
+  removeFavorite: (id: string) => void;
   updateSetting: (path: SettingPath, value: string | number | boolean) => void;
   resetSettings: () => void;
 
@@ -175,7 +226,8 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
   sidebar: "connections",
   tabs: [],
   activeTabId: null,
-  history: [],
+  history: loadLocalList<HistoryEntry>("quarry.query-history"),
+  favorites: loadLocalList<QueryFavorite>("quarry.query-favorites"),
   snippets: [],
   objectCache: {},
   objectDialog: null,
@@ -449,22 +501,21 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     const started = Date.now();
     const session = get().sessions.find((s) => s.id === tab.sessionId);
     const recordHistory = (ok: boolean, rowCount: number) => {
-      set((state) => ({
-        history: [
-          {
-            id: crypto.randomUUID(),
-            sql,
-            sessionId: tab.sessionId,
-            sessionName: session?.name ?? "unknown",
-            database: tab.database,
-            at: Date.now(),
-            ok,
-            durationMs: Date.now() - started,
-            rowCount,
-          },
-          ...state.history,
-        ].slice(0, 200),
-      }));
+      set((state) => {
+        const history = [{
+          id: crypto.randomUUID(),
+          sql,
+          sessionId: tab.sessionId,
+          sessionName: session?.name ?? "unknown",
+          database: tab.database,
+          at: Date.now(),
+          ok,
+          durationMs: Date.now() - started,
+          rowCount,
+        }, ...state.history].slice(0, 200);
+        saveLocalList("quarry.query-history", history);
+        return { history };
+      });
     };
     try {
       const result = await ipc.executeQuery(tab.sessionId, {
@@ -625,6 +676,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     // The editor and the grid must show the same query: build the preview SQL
     // once, use it as the tab's text, and run it through the normal path.
     const quote = detail.identifierQuote || '"';
+    const language = queryLanguageFor(get().drivers, get().sessions, ref.sessionId);
     const isTable = ref.objectKind === "table";
     const columnTypes: Record<string, string> = {};
     for (const column of detail.schema.columns) columnTypes[column.name] = column.dataType;
@@ -633,7 +685,8 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       title: `${ref.object} data`,
       sessionId: ref.sessionId,
       database: ref.database,
-      sql: previewSql(ref, quote, 0, pageSize),
+      sql: previewSql(ref, quote, 0, pageSize, language),
+      objectRef: ref,
       preview: { limit: pageSize, offset: 0 },
       editSource: isTable
         ? {
@@ -652,9 +705,19 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
 
   pageObjectData: async (tabId, offset) => {
     const tab = get().tabs.find((t) => t.id === tabId);
-    if (!tab?.editSource || offset < 0) return;
-    const limit = tab.preview?.limit ?? get().settings.results.pageSize;
-    const sql = previewSql(tab.editSource.ref, tab.editSource.quote, offset, limit);
+    if (!tab?.preview || offset < 0) return;
+    const limit = tab.preview.limit;
+    const language = tab.sessionId
+      ? queryLanguageFor(get().drivers, get().sessions, tab.sessionId)
+      : "sql";
+    let sql: string;
+    if (language === "mongo") {
+      if (!tab.objectRef) return;
+      sql = previewSql(tab.objectRef, "", offset, limit, language);
+    } else {
+      if (!tab.editSource) return;
+      sql = previewSql(tab.editSource.ref, tab.editSource.quote, offset, limit, language);
+    }
     get().updateTab(tabId, { sql, preview: { limit, offset } });
     await get().runTab(tabId);
   },
@@ -774,7 +837,30 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     }
   },
 
-  clearHistory: () => set({ history: [] }),
+  clearHistory: () => {
+    saveLocalList("quarry.query-history", []);
+    set({ history: [] });
+  },
+
+  toggleFavorite: (tabId, name) => {
+    const tab = get().tabs.find((candidate) => candidate.id === tabId);
+    if (!tab?.sql.trim()) return;
+    const session = get().sessions.find((candidate) => candidate.id === tab.sessionId);
+    set((state) => {
+      const existing = state.favorites.find((favorite) => favorite.sql === tab.sql.trim() && favorite.sessionId === tab.sessionId && favorite.database === tab.database);
+      const favorites = existing
+        ? state.favorites.filter((favorite) => favorite.id !== existing.id)
+        : [{ id: crypto.randomUUID(), sql: tab.sql.trim(), sessionId: tab.sessionId, sessionName: session?.name ?? "unknown", database: tab.database, name: name?.trim() || tab.title || "Favorite query", createdAt: Date.now() }, ...state.favorites].slice(0, 200);
+      saveLocalList("quarry.query-favorites", favorites);
+      return { favorites };
+    });
+  },
+
+  removeFavorite: (id) => set((state) => {
+    const favorites = state.favorites.filter((favorite) => favorite.id !== id);
+    saveLocalList("quarry.query-favorites", favorites);
+    return { favorites };
+  }),
 
   updateSetting: (path, value) => {
     set({ settings: writeSetting(get().settings, path, value) });

@@ -8,6 +8,7 @@ import {
   Database as DatabaseIcon,
   Download,
   ExternalLink,
+  FileUp,
   FileCode2,
   Hash,
   KeyRound,
@@ -26,9 +27,21 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ContextMenu, type MenuEntry } from "@/components/ui/context-menu";
 import { Tabs } from "@/components/ui/tabs";
+import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { ImportDialog } from "@/components/objects/ImportDialog";
+import { InspectorSectionView } from "@/components/objects/InspectorSectionView";
+import { EntityDiagram } from "@/components/schema/EntityDiagram";
 import { errorMessage, ipc } from "@/lib/ipc";
-import { objectKey, type ObjectRef } from "@/lib/objects";
-import type { ColumnSchema, ObjectAction, ObjectDetail, ObjectKind } from "@/lib/types";
+import { dialectForDriver, objectKey, type ObjectRef } from "@/lib/objects";
+import { actionConfirm } from "@/lib/sections";
+import type {
+  ColumnSchema,
+  InspectorSection,
+  ObjectAction,
+  ObjectDetail,
+  ObjectKind,
+  SectionAction,
+} from "@/lib/types";
 import { useWorkspace } from "@/stores/workspace";
 
 const KIND_ICON: Record<ObjectKind, typeof Table2> = {
@@ -37,6 +50,7 @@ const KIND_ICON: Record<ObjectKind, typeof Table2> = {
   materializedView: Layers,
   collection: Layers,
   keySpace: KeyRound,
+  key: KeyRound,
   function: FileCode2,
   procedure: Braces,
   trigger: Zap,
@@ -44,6 +58,13 @@ const KIND_ICON: Record<ObjectKind, typeof Table2> = {
   sequence: KeyRound,
   other: Table2,
 };
+
+/**
+ * Section tab ids are namespaced: the id itself comes from the driver, and a
+ * driver that happens to use a built-in tab id (say `ddl`) must not collide with
+ * it. The section's own id is what gets sent back in a request.
+ */
+const sectionTabId = (sectionId: string) => `section:${sectionId}`;
 
 export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
   const detail = useWorkspace((s) => s.objectCache[objectKey(objectRef)]) as ObjectDetail | undefined;
@@ -58,16 +79,27 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
   const [menuAt, setMenuAt] = useState<{ x: number; y: number } | null>(null);
   const [rowCount, setRowCount] = useState<number | null>(null);
   const [counting, setCounting] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  // A driver-declared section action awaiting confirmation. It carries its own
+  // confirm copy, so this component never needs to know what the action does.
+  const [pending, setPending] = useState<{
+    section: InspectorSection;
+    action: SectionAction;
+    param?: string;
+  } | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
 
   const key = objectKey(objectRef);
   useEffect(() => {
     // This component instance is reused when the active object tab changes, so
     // the object-specific count must not leak from the previous table.
     setRowCount(null);
+    setTab(objectRef.objectKind === "trigger" ? "ddl" : "columns");
     void loadObjectDetail(objectRef);
-  }, [key, loadObjectDetail]);
+  }, [key, loadObjectDetail, objectRef.objectKind]);
 
   const quote = detail?.identifierQuote || '"';
+  const driverId = useWorkspace((s) => s.sessions.find((session) => session.id === objectRef.sessionId)?.driver);
   const supports = (action: ObjectAction) => detail?.actions.includes(action) ?? false;
   const isTable = objectRef.objectKind === "table";
 
@@ -87,6 +119,34 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
       pushToast({ title: "Count failed", description: errorMessage(error), variant: "error" });
     } finally {
       setCounting(false);
+    }
+  }
+
+  async function runSectionAction() {
+    if (!pending) return;
+    setActionBusy(true);
+    try {
+      const response = await ipc.objectSectionAction({
+        connectionId: objectRef.sessionId,
+        database: objectRef.database,
+        namespace: objectRef.namespace,
+        object: objectRef.object,
+        section: pending.section.id,
+        action: pending.action.id,
+        param: pending.param,
+      });
+      const error = response.results.find((result) => result.error)?.error;
+      if (error) throw new Error(error);
+      await loadObjectDetail(objectRef, true);
+      setPending(null);
+    } catch (error) {
+      pushToast({
+        title: `${pending.action.confirmLabel ?? pending.action.label} failed`,
+        description: errorMessage(error),
+        variant: "error",
+      });
+    } finally {
+      setActionBusy(false);
     }
   }
 
@@ -111,9 +171,28 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
   const Icon = KIND_ICON[objectRef.objectKind] ?? Table2;
   const maintenanceOptions: ("optimize" | "analyze" | "vacuum")[] =
     quote === "`" ? ["optimize", "analyze"] : ["vacuum", "analyze"];
+  const trigger = objectRef.objectKind === "trigger";
+  // Inspector tabs the driver declared for this object, read straight off the
+  // detail so a new engine needs no change here.
+  const tabs = trigger
+    ? [{ id: "ddl", label: "Trigger SQL" }]
+    : [
+        { id: "columns", label: "Columns", hint: String(detail.schema.columns.length) },
+        { id: "diagram", label: "ER diagram" },
+        { id: "indexes", label: "Indexes", hint: String(detail.schema.indexes.length) },
+        { id: "keys", label: "Foreign keys", hint: String(detail.schema.foreignKeys.length) },
+        ...detail.sections.map((section) => ({
+          id: sectionTabId(section.id),
+          label: section.label,
+        })),
+        { id: "ddl", label: "DDL" },
+      ];
+  // A reload can drop a declared section (or the object can change while its
+  // section is open), so the active tab always falls back to a tab that exists.
+  const activeTab = tabs.some((entry) => entry.id === tab) ? tab : tabs[0].id;
   const menuEntries: MenuEntry[] = [
-    { type: "label", label: "Table" },
-    ...(supports("renameObject")
+    { type: "label", label: trigger ? "Trigger" : "Table" },
+    ...(!trigger && supports("renameObject")
       ? [
           {
             label: "Rename…",
@@ -122,7 +201,7 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
           },
         ]
       : []),
-    ...(supports("duplicateObject")
+    ...(!trigger && supports("duplicateObject")
       ? [
           {
             label: "Duplicate…",
@@ -131,14 +210,14 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
           },
         ]
       : []),
-    ...(supports("maintenance")
+    ...(!trigger && supports("maintenance")
       ? maintenanceOptions.map((maintenance) => ({
           label: `Maintenance: ${maintenance}`,
           icon: <ListTree className="h-3.5 w-3.5" />,
           onSelect: () => openObjectDialog({ ref: objectRef, kind: "maintenance", maintenance }),
         }))
       : []),
-    ...(supports("reindex")
+    ...(!trigger && supports("reindex")
       ? [
           {
             label: "Reindex",
@@ -149,7 +228,7 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
       : []),
     { type: "separator" },
     { type: "label", label: "Danger" },
-    ...(supports("truncate") && isTable
+    ...(!trigger && supports("truncate") && isTable
       ? [
           {
             label: "Truncate (delete all rows)",
@@ -170,6 +249,10 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
         ]
       : []),
   ];
+  // An object whose only supported action is "inspect" (a Redis key) has no
+  // entries past the section headings, so the button is hidden instead of
+  // opening a menu that does nothing.
+  const hasMenuActions = menuEntries.some((entry) => entry.type !== "label" && entry.type !== "separator");
 
   return (
     <div className="flex h-full min-h-0 flex-col">
@@ -187,25 +270,34 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
         {rowCount != null ? <Badge variant="muted">{rowCount} rows</Badge> : null}
 
         <div className="ml-auto flex items-center gap-1">
-          <Button size="xs" variant="outline" disabled={counting} onClick={() => void countRows()}>
-            {counting ? "Counting…" : "Count rows"}
-          </Button>
+          {!trigger && supports("countRows") ? (
+            <Button size="xs" variant="outline" disabled={counting} onClick={() => void countRows()}>
+              {counting ? "Counting…" : "Count rows"}
+            </Button>
+          ) : null}
           <Button size="xs" variant="outline" onClick={() => void loadObjectDetail(objectRef, true)}>
             <RefreshCw className="h-3 w-3" /> Refresh
           </Button>
-          <Button size="xs" variant="outline" onClick={() => void openObjectData(objectRef)}>
-            <ExternalLink className="h-3 w-3" /> View data
-          </Button>
-          <Button size="xs" variant="ghost" onClick={() => copy(detail.ddl, "DDL")}>
-            <Copy className="h-3 w-3" /> DDL
-          </Button>
-          <Button size="xs" variant="ghost" onClick={(e) => setMenuAt({ x: e.clientX, y: e.clientY })}>
-            More <ChevronDown className="h-3 w-3" />
-          </Button>
+          {!trigger && supports("viewData") ? (
+            <Button size="xs" variant="outline" onClick={() => void openObjectData(objectRef)}>
+              <ExternalLink className="h-3 w-3" /> View data
+            </Button>
+          ) : null}
+          {supports("copyDdl") ? (
+            <Button size="xs" variant="ghost" onClick={() => copy(detail.ddl, "DDL")}>
+              <Copy className="h-3 w-3" /> DDL
+            </Button>
+          ) : null}
+          {hasMenuActions ? (
+            <Button size="xs" variant="ghost" onClick={(e) => setMenuAt({ x: e.clientX, y: e.clientY })}>
+              More <ChevronDown className="h-3 w-3" />
+            </Button>
+          ) : null}
         </div>
       </header>
 
-      <div className="flex flex-wrap items-center gap-1.5 border-b border-border px-3 py-1.5">
+      {!trigger ? (
+        <div className="flex flex-wrap items-center gap-1.5 border-b border-border px-3 py-1.5">
         {supports("createIndex") ? (
           <Button size="xs" variant="ghost" onClick={() => openObjectDialog({ ref: objectRef, kind: "index" })}>
             <Plus className="h-3 w-3" /> Index
@@ -216,54 +308,71 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
             <Plus className="h-3 w-3" /> Column
           </Button>
         ) : null}
-        <Button size="xs" variant="ghost" onClick={() => void openObjectTemplate(objectRef, "select")}>
-          SELECT
-        </Button>
-        <Button size="xs" variant="ghost" onClick={() => void openObjectTemplate(objectRef, "insert")}>
-          INSERT
-        </Button>
-        <Button size="xs" variant="ghost" onClick={() => void openObjectTemplate(objectRef, "update")}>
-          UPDATE
-        </Button>
-        <Button size="xs" variant="ghost" onClick={() => void openObjectTemplate(objectRef, "delete")}>
-          DELETE
-        </Button>
+        {supports("templateSelect") ? (
+          <Button size="xs" variant="ghost" onClick={() => void openObjectTemplate(objectRef, "select")}>
+            SELECT
+          </Button>
+        ) : null}
+        {supports("templateInsert") ? (
+          <Button size="xs" variant="ghost" onClick={() => void openObjectTemplate(objectRef, "insert")}>
+            INSERT
+          </Button>
+        ) : null}
+        {supports("templateUpdate") ? (
+          <Button size="xs" variant="ghost" onClick={() => void openObjectTemplate(objectRef, "update")}>
+            UPDATE
+          </Button>
+        ) : null}
+        {supports("templateDelete") ? (
+          <Button size="xs" variant="ghost" onClick={() => void openObjectTemplate(objectRef, "delete")}>
+            DELETE
+          </Button>
+        ) : null}
         {supports("exportData") ? (
           <Button size="xs" variant="ghost" onClick={() => openObjectDialog({ ref: objectRef, kind: "export" })}>
             <Download className="h-3 w-3" /> Export
           </Button>
         ) : null}
-      </div>
+        {objectRef.objectKind === "table" && detail.schema.columns.length > 0 ? (
+          <Button size="xs" variant="ghost" onClick={() => setImportOpen(true)}>
+            <FileUp className="h-3 w-3" /> Import
+          </Button>
+        ) : null}
+        </div>
+      ) : null}
 
-      <Tabs
-        className="min-h-0 flex-1"
-        value={tab}
-        onChange={setTab}
-        tabs={[
-          { id: "columns", label: "Columns", hint: String(detail.schema.columns.length) },
-          { id: "indexes", label: "Indexes", hint: String(detail.schema.indexes.length) },
-          { id: "keys", label: "Foreign keys", hint: String(detail.schema.foreignKeys.length) },
-          { id: "ddl", label: "DDL" },
-        ]}
-      >
-        {tab === "columns" ? (
+      <Tabs className="min-h-0 flex-1" value={activeTab} onChange={setTab} tabs={tabs}>
+        {!trigger && activeTab === "columns" ? (
           <ColumnsTable
             columns={detail.schema.columns}
             onAlter={(column) => openObjectDialog({ ref: objectRef, kind: "alterColumn", column })}
             onDrop={(column) => openObjectDialog({ ref: objectRef, kind: "dropColumn", column })}
-            canAlter={supports("alterColumn")}
-            canDrop={supports("dropColumn")}
+            canAlter={!trigger && supports("alterColumn")}
+            canDrop={!trigger && supports("dropColumn")}
           />
         ) : null}
-        {tab === "indexes" ? (
+        {!trigger && activeTab === "indexes" ? (
           <IndexesTable
             indexes={detail.schema.indexes}
             onDrop={(indexName) => openObjectDialog({ ref: objectRef, kind: "dropIndex", indexName })}
-            canDrop={supports("dropIndex")}
+            canDrop={!trigger && supports("dropIndex")}
           />
         ) : null}
-        {tab === "keys" ? <KeysTable detail={detail} /> : null}
-        {tab === "ddl" ? (
+        {!trigger && activeTab === "keys" ? <KeysTable detail={detail} /> : null}
+        {!trigger && activeTab === "diagram" ? <EntityDiagram objectRef={objectRef} detail={detail} /> : null}
+        {!trigger
+          ? detail.sections.map((section) =>
+              activeTab === sectionTabId(section.id) ? (
+                <InspectorSectionView
+                  key={section.id}
+                  section={section}
+                  objectRef={objectRef}
+                  onAction={(source, action, param) => setPending({ section: source, action, param })}
+                />
+              ) : null,
+            )
+          : null}
+        {activeTab === "ddl" ? (
           <div className="flex h-full flex-col">
             <div className="flex items-center justify-end border-b border-border px-3 py-1.5">
               <Button size="xs" variant="ghost" onClick={() => copy(detail.ddl, "DDL")}>
@@ -293,6 +402,16 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
 
       {menuAt ? (
         <ContextMenu entries={menuEntries} x={menuAt.x} y={menuAt.y} onClose={() => setMenuAt(null)} />
+      ) : null}
+      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} objectRef={objectRef} detail={detail} dialect={dialectForDriver(driverId)} />
+      {pending ? (
+        <ConfirmDialog
+          open
+          {...actionConfirm(pending.action, pending.param)}
+          busy={actionBusy}
+          onClose={() => setPending(null)}
+          onConfirm={() => void runSectionAction()}
+        />
       ) : null}
     </div>
   );

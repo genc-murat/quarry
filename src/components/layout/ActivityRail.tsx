@@ -1,4 +1,4 @@
-import { Bookmark, FolderTree, History, Plug, Plus, Settings, Sparkles } from "lucide-react";
+import { Bookmark, FolderTree, GitCompareArrows, History, Plug, Plus, Settings, Sparkles } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { type SidebarView, useWorkspace } from "@/stores/workspace";
@@ -6,6 +6,7 @@ import { type SidebarView, useWorkspace } from "@/stores/workspace";
 const ITEMS: { id: SidebarView; icon: typeof Plug; label: string }[] = [
   { id: "connections", icon: Plug, label: "Connections" },
   { id: "explorer", icon: FolderTree, label: "Explorer" },
+  { id: "schema", icon: GitCompareArrows, label: "Schema tools" },
   { id: "history", icon: History, label: "History" },
   { id: "snippets", icon: Bookmark, label: "Saved queries" },
   { id: "settings", icon: Settings, label: "Settings" },

@@ -27,6 +27,20 @@ export function ConnectionList() {
   const sessionForProfile = (profileId: string) =>
     sessions.find((s) => s.profileId === profileId);
 
+  // Server drivers show `user@host:port`; file-backed ones (SQLite) show the
+  // file path. Detected from the driver's own form, so no driver id is hardcoded.
+  const endpointFor = (profile: ConnectionProfile) => {
+    const driver = drivers.find((d) => d.id === profile.driver);
+    const serverBased = driver?.configFields.some((field) => field.key === "host") ?? true;
+    if (!serverBased) {
+      const path = profile.options?.path;
+      return typeof path === "string" && path ? path : (driver?.displayName ?? profile.driver);
+    }
+    return `${profile.username}@${profile.host}:${profile.port}${
+      profile.database ? `/${profile.database}` : ""
+    }`;
+  };
+
   return (
     <div className="flex h-full flex-col">
       <header className="flex items-center justify-between px-3 py-2.5">
@@ -50,7 +64,8 @@ export function ConnectionList() {
         {profiles.length === 0 ? (
           <div className="mx-1 mt-6 rounded-lg border border-dashed border-border p-4 text-center">
             <p className="text-xs text-muted-foreground">
-              No connections yet. Add a MySQL 5.6 or PostgreSQL server to get started.
+              No connections yet. Add a MySQL 5.6, PostgreSQL, SQLite or Redis server to get
+              started.
             </p>
             <Button
               size="sm"
@@ -86,8 +101,7 @@ export function ConnectionList() {
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium">{profile.name}</p>
                   <p className="truncate text-[11px] text-muted-foreground">
-                    {profile.username}@{profile.host}:{profile.port}
-                    {profile.database ? `/${profile.database}` : ""}
+                    {endpointFor(profile)}
                   </p>
                   <div className="mt-1 flex items-center gap-1.5">
                     {profile.hasPassword ? (

@@ -27,7 +27,7 @@ import { ContextMenu, type MenuEntry } from "@/components/ui/context-menu";
 import { CreateTableDialog } from "@/components/objects/CreateTableDialog";
 import { errorMessage, ipc } from "@/lib/ipc";
 import { explorerTree, touchExplorerTree } from "@/lib/explorerTree";
-import { groupObjectsByKind, qualifiedName, type ObjectRef } from "@/lib/objects";
+import { dialectForDriver, groupObjectsByKind, qualifiedName, type ObjectRef } from "@/lib/objects";
 import type { DatabaseInfo, DatabaseObject, NamespaceInfo, ObjectAction, ObjectKind } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { useWorkspace } from "@/stores/workspace";
@@ -38,6 +38,7 @@ const OBJECT_ICON: Record<ObjectKind, typeof Table2> = {
   materializedView: Layers,
   collection: Layers,
   keySpace: KeyRound,
+  key: KeyRound,
   function: FileCode2,
   procedure: Braces,
   trigger: Zap,
@@ -267,6 +268,10 @@ export function ExplorerPanel() {
 
   const sessionDriver = drivers.find((driver) => driver.id === session?.driver);
   const supportedActions = sessionDriver?.capabilities.supportedActions ?? [];
+  // SQL-only affordances (qualified names, DDL, query templates, the table
+  // wizard) are hidden for non-relational drivers such as Redis.
+  const relational = sessionDriver?.capabilities.isRelational ?? true;
+  const supportsDdl = sessionDriver?.capabilities.supportsDdl ?? true;
   const quote = sessionDriver?.id === "mysql" ? "`" : '"';
 
   function refFor(database: string, object: DatabaseObject): ObjectRef {
@@ -307,6 +312,9 @@ export function ExplorerPanel() {
     const ref = refFor(database, object);
     const supports = (action: ObjectAction) => supportedActions.includes(action);
     const isTable = object.kind === "table";
+    const trigger = object.kind === "trigger";
+    const canObjectAction = (action: ObjectAction) =>
+      supports(action) && (!trigger || action === "dropObject");
     const maintenance: ("optimize" | "analyze" | "vacuum")[] =
       quote === "`" ? ["optimize", "analyze"] : ["vacuum", "analyze"];
 
@@ -342,23 +350,34 @@ export function ExplorerPanel() {
       { type: "separator" },
       { type: "label", label: "Copy" },
       { label: "Copy name", icon: <Copy className="h-3.5 w-3.5" />, onSelect: () => void copy(object.name, "Name") },
-      {
-        label: "Copy qualified name",
-        icon: <Copy className="h-3.5 w-3.5" />,
-        onSelect: () =>
-          void copy(
-            qualifiedName({ database, namespace: object.schema ?? null, object: object.name }, quote),
-            "Qualified name",
-          ),
-      },
-      { label: "Copy DDL", icon: <Copy className="h-3.5 w-3.5" />, onSelect: () => void copyDdl(ref) },
-      { type: "separator" },
-      { type: "label", label: "Templates" },
-      { label: "SELECT", onSelect: () => void openObjectTemplate(ref, "select") },
-      { label: "INSERT", onSelect: () => void openObjectTemplate(ref, "insert") },
-      { label: "UPDATE", onSelect: () => void openObjectTemplate(ref, "update") },
-      { label: "DELETE", onSelect: () => void openObjectTemplate(ref, "delete") },
-      ...(supports("exportData")
+      ...(relational && !trigger
+        ? [
+            {
+              label: "Copy qualified name",
+              icon: <Copy className="h-3.5 w-3.5" />,
+              onSelect: () =>
+                void copy(
+                  qualifiedName(
+                    { database, namespace: object.schema ?? null, object: object.name },
+                    quote,
+                  ),
+                  "Qualified name",
+                ),
+            },
+            {
+              label: "Copy DDL",
+              icon: <Copy className="h-3.5 w-3.5" />,
+              onSelect: () => void copyDdl(ref),
+            },
+            { type: "separator" } as MenuEntry,
+            { type: "label", label: "Templates" } as MenuEntry,
+            { label: "SELECT", onSelect: () => void openObjectTemplate(ref, "select") },
+            { label: "INSERT", onSelect: () => void openObjectTemplate(ref, "insert") },
+            { label: "UPDATE", onSelect: () => void openObjectTemplate(ref, "update") },
+            { label: "DELETE", onSelect: () => void openObjectTemplate(ref, "delete") },
+          ]
+        : []),
+      ...(!trigger && supports("exportData")
         ? [
             {
               label: "Export…",
@@ -369,7 +388,7 @@ export function ExplorerPanel() {
         : []),
       { type: "separator" },
       { type: "label", label: "Structure" },
-      ...(supports("createIndex")
+      ...(!trigger && supports("createIndex")
         ? [
             {
               label: "Create index…",
@@ -378,7 +397,7 @@ export function ExplorerPanel() {
             },
           ]
         : []),
-      ...(supports("addColumn")
+      ...(!trigger && supports("addColumn")
         ? [
             {
               label: "Add column…",
@@ -387,7 +406,7 @@ export function ExplorerPanel() {
             },
           ]
         : []),
-      ...(supports("renameObject")
+      ...(!trigger && supports("renameObject")
         ? [
             {
               label: "Rename…",
@@ -396,7 +415,7 @@ export function ExplorerPanel() {
             },
           ]
         : []),
-      ...(supports("duplicateObject")
+      ...(!trigger && supports("duplicateObject")
         ? [
             {
               label: "Duplicate…",
@@ -404,19 +423,19 @@ export function ExplorerPanel() {
             },
           ]
         : []),
-      ...(supports("maintenance")
+      ...(!trigger && supports("maintenance")
         ? maintenance.map((kind) => ({
             label: `Maintenance: ${kind}`,
             icon: <ListTree className="h-3.5 w-3.5" />,
             onSelect: () => openObjectDialog({ ref, kind: "maintenance", maintenance: kind }),
           }))
         : []),
-      ...(supports("reindex")
+      ...(!trigger && supports("reindex")
         ? [{ label: "Reindex", onSelect: () => openObjectDialog({ ref, kind: "reindex" }) }]
         : []),
       { type: "separator" },
       { type: "label", label: "Danger" },
-      ...(supports("truncate") && isTable
+      ...(!trigger && supports("truncate") && isTable
         ? [
             {
               label: "Truncate…",
@@ -426,7 +445,7 @@ export function ExplorerPanel() {
             },
           ]
         : []),
-      ...(supports("dropObject")
+      ...(canObjectAction("dropObject")
         ? [
             {
               label: `Drop ${object.kind}…`,
@@ -463,15 +482,17 @@ export function ExplorerPanel() {
           </p>
         </div>
         <div className="flex items-center gap-1">
-          <Button
-            size="icon-sm"
-            variant="ghost"
-            title="New table"
-            disabled={!sessionId}
-            onClick={() => setCreateOpen(true)}
-          >
-            <Plus className="h-3.5 w-3.5" />
-          </Button>
+          {supportsDdl ? (
+            <Button
+              size="icon-sm"
+              variant="ghost"
+              title="New table"
+              disabled={!sessionId}
+              onClick={() => setCreateOpen(true)}
+            >
+              <Plus className="h-3.5 w-3.5" />
+            </Button>
+          ) : null}
           <Button size="icon-sm" variant="ghost" title="Refresh" onClick={refresh}>
             <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
           </Button>
@@ -582,6 +603,7 @@ export function ExplorerPanel() {
         databases={databases.map((database) => database.name)}
         defaultDatabase={databases[0]?.name ?? session.server.currentDatabase ?? ""}
         quote={quote}
+        dialect={dialectForDriver(session?.driver)}
         busy={creating}
         onRun={async (request) => {
           setCreating(true);

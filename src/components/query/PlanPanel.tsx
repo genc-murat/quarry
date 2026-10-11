@@ -60,9 +60,7 @@ export function PlanPanel({ plan, explaining }: Props) {
           </div>
         ) : null}
         {plan ? (
-          <span className="ml-auto text-[11px] text-muted-foreground/70">
-            MySQL/PostgreSQL EXPLAIN output
-          </span>
+          <span className="ml-auto text-[11px] text-muted-foreground/70">{statement?.statement.startsWith("EXPLAIN indexes = 1") ? "ClickHouse index pruning plan (estimated parts/granules)" : "query plan output"}</span>
         ) : null}
       </div>
 

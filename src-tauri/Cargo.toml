@@ -27,15 +27,27 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 base64 = "0.22"
 aes-gcm = "0.10"
 futures-util = "0.3"
+percent-encoding = "2"
+redis = { version = "1", default-features = false, features = [
+  "tokio-comp",
+  "connection-manager",
+  "tokio-rustls-comp",
+] }
 sqlx = { version = "0.8", default-features = false, features = [
   "runtime-tokio",
   "tls-rustls-ring",
   "mysql",
   "postgres",
+  "sqlite",
   "chrono",
   "bigdecimal",
   "json",
   "uuid",
+] }
+mongodb = "3"
+clickhouse = { version = "0.13", default-features = false, features = [
+  "rustls-tls-ring",
+  "rustls-tls-native-roots",
 ] }
 
 [features]

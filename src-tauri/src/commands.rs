@@ -16,10 +16,10 @@ use crate::drivers::Connection;
 use crate::error::DriverError;
 use crate::models::{
     ConnectResult, ConnectionConfig, ConnectionProfile, CreateTableRequest, DatabaseInfo,
-    DatabaseObject, DriverDescriptor, NamespaceInfo, ObjectAction, ObjectActionRequest,
-    ObjectDetail, ObjectKind, ObjectSchema,
-    OpenSessionRequest, QueryRequest, QueryResponse, RowChangeKind, RowChangeRequest, ServerInfo,
-    SessionInfo, Snippet, SslMode, TableColumns,
+    DatabaseObject, DriverDescriptor, InspectorSection, NamespaceInfo, ObjectAction,
+    ObjectActionRequest, ObjectDetail, ObjectKind, ObjectSchema, OpenSessionRequest, QueryRequest,
+    QueryResponse, RowChangeKind, RowChangeRequest, SectionActionRequest, SectionRequest,
+    ServerInfo, SessionInfo, Snippet, SslMode, TableColumns,
 };
 use crate::session::SessionEntry;
 use crate::sql_split::split_statements;
@@ -118,14 +118,10 @@ pub async fn test_connection(
     state: State<'_, AppState>,
     config: ConnectionConfig,
 ) -> CmdResult<ServerInfo> {
-    let driver = state
-        .registry
-        .get(&config.driver)
-        .ok_or_else(|| DriverError::Config(format!("unknown driver: {}", config.driver)).to_string())?;
-    driver
-        .test(&config)
-        .await
-        .map_err(|e| e.to_string())
+    let driver = state.registry.get(&config.driver).ok_or_else(|| {
+        DriverError::Config(format!("unknown driver: {}", config.driver)).to_string()
+    })?;
+    driver.test(&config).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -135,10 +131,9 @@ pub async fn connect(
 ) -> CmdResult<ConnectResult> {
     let (profile_id, name, config) = resolve_open_request(&state, input)?;
 
-    let driver = state
-        .registry
-        .get(&config.driver)
-        .ok_or_else(|| DriverError::Config(format!("unknown driver: {}", config.driver)).to_string())?;
+    let driver = state.registry.get(&config.driver).ok_or_else(|| {
+        DriverError::Config(format!("unknown driver: {}", config.driver)).to_string()
+    })?;
 
     let connection = driver.connect(&config).await.map_err(|e| e.to_string())?;
     let id = uuid::Uuid::new_v4().to_string();
@@ -352,10 +347,10 @@ pub async fn explain_query(
         match conn.explain_statement(statement) {
             Some(sql) => explained.push(sql),
             None => {
-                return Err(DriverError::Unsupported(
-                    "this driver cannot explain queries".into(),
+                return Err(
+                    DriverError::Unsupported("this driver cannot explain queries".into())
+                        .to_string(),
                 )
-                .to_string())
             }
         }
     }
@@ -372,8 +367,36 @@ pub async fn explain_query(
         .map_err(|e| e.to_string())
 }
 
-/// Everything the object inspector shows: schema, generated DDL, row count and
-/// the actions this driver supports.
+/// Body of a driver-declared `Live` inspector section. The driver answers for
+/// the ids it advertised and refuses anything else, so this stays a router.
+#[tauri::command]
+pub async fn object_section(
+    state: State<'_, AppState>,
+    request: SectionRequest,
+) -> CmdResult<InspectorSection> {
+    let conn = connection(&state, &request.connection_id).await?;
+    conn.section_body(&request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Run an operation a section advertised. What an action means (and whether the
+/// caller may run it against this object) is the driver's business: it owns
+/// both the descriptor and the re-validation, so nothing engine-specific leaks
+/// into the IPC layer.
+#[tauri::command]
+pub async fn object_section_action(
+    state: State<'_, AppState>,
+    request: SectionActionRequest,
+) -> CmdResult<QueryResponse> {
+    let conn = connection(&state, &request.connection_id).await?;
+    conn.run_section_action(request)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+/// Everything the object inspector shows: schema, generated DDL, row count, the
+/// actions this driver supports and the inspector sections it declares.
 #[tauri::command]
 pub async fn object_detail(
     state: State<'_, AppState>,
@@ -393,7 +416,10 @@ pub async fn object_detail(
         .map_err(|e| e.to_string())?;
     // Counting a view can be expensive or unsupported; never fail the whole
     // inspector because of it.
-    let row_count = if matches!(schema.kind, ObjectKind::Table | ObjectKind::MaterializedView) {
+    let row_count = if matches!(
+        schema.kind,
+        ObjectKind::Table | ObjectKind::MaterializedView
+    ) {
         conn.count_rows(&database, namespace.as_deref(), &object)
             .await
             .ok()
@@ -401,6 +427,12 @@ pub async fn object_detail(
         None
     };
 
+    // Extra panels are the driver's own; a driver that cannot describe them
+    // must not take the whole inspector down with it.
+    let sections = conn
+        .inspect_sections(&database, namespace.as_deref(), &object, &schema)
+        .await
+        .unwrap_or_default();
     Ok(ObjectDetail {
         schema,
         ddl,
@@ -408,6 +440,7 @@ pub async fn object_detail(
         size_bytes: None,
         actions: conn.capabilities().supported_actions,
         identifier_quote: conn.dialect().quote_char().to_string(),
+        sections,
     })
 }
 
@@ -419,6 +452,26 @@ pub async fn object_action(
 ) -> CmdResult<QueryResponse> {
     let conn = connection(&state, &request.connection_id).await?;
     let supported = conn.capabilities().supported_actions;
+    // Always resolve the real object kind from the connection: `object_kind`
+    // is caller-controlled IPC data and must not let a trigger masquerade as a table.
+    let object_kind = conn
+        .describe_object(
+            &request.database,
+            request.namespace.as_deref(),
+            &request.object,
+        )
+        .await
+        .map_err(|error| error.to_string())?
+        .kind;
+    if conn.driver_id() == "sqlite"
+        && object_kind == ObjectKind::Trigger
+        && request.action != ObjectAction::DropObject
+    {
+        return Err(DriverError::Unsupported(
+            "SQLite triggers only support drop; table actions do not apply".into(),
+        )
+        .to_string());
+    }
     if !supported.iter().any(|action| *action == request.action) {
         return Err(DriverError::Unsupported(format!(
             "{} does not support {:?}",
@@ -433,19 +486,11 @@ pub async fn object_action(
         request.action,
         ObjectAction::Truncate | ObjectAction::Maintenance | ObjectAction::Reindex
     ) {
-        let kind = match request.object_kind {
-            Some(kind) => kind,
-            None => conn
-                .describe_object(&request.database, request.namespace.as_deref(), &request.object)
-                .await
-                .map_err(|e| e.to_string())?
-                .kind,
-        };
-        if kind != ObjectKind::Table {
-            return Err(
-                DriverError::Unsupported("this action is only available for tables".into())
-                    .to_string(),
-            );
+        if object_kind != ObjectKind::Table {
+            return Err(DriverError::Unsupported(
+                "this action is only available for tables".into(),
+            )
+            .to_string());
         }
     }
 
@@ -479,6 +524,26 @@ fn prepare_row_change(
         return Err(DriverError::Unsupported(
             "only tables can be edited row by row".into(),
         ));
+    }
+    let valid_columns: std::collections::HashSet<&str> = schema
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect();
+    let mut seen_values = std::collections::HashSet::new();
+    for value in &request.values {
+        if !valid_columns.contains(value.column.as_str()) {
+            return Err(DriverError::Config(format!(
+                "unknown column: {}",
+                value.column
+            )));
+        }
+        if !seen_values.insert(value.column.as_str()) {
+            return Err(DriverError::Config(format!(
+                "duplicate column: {}",
+                value.column
+            )));
+        }
     }
     match request.kind {
         RowChangeKind::Insert => {
@@ -532,7 +597,11 @@ pub async fn apply_row_change(
 ) -> CmdResult<QueryResponse> {
     let conn = connection(&state, &request.connection_id).await?;
     let schema = conn
-        .describe_object(&request.database, request.namespace.as_deref(), &request.object)
+        .describe_object(
+            &request.database,
+            request.namespace.as_deref(),
+            &request.object,
+        )
         .await
         .map_err(|e| e.to_string())?;
     let mut request = request;
@@ -549,6 +618,45 @@ pub async fn apply_row_changes(
     state: State<'_, AppState>,
     requests: Vec<RowChangeRequest>,
 ) -> CmdResult<QueryResponse> {
+    if requests.len() > 100 {
+        return Err(
+            DriverError::Config("row-change batches are limited to 100 rows".into()).to_string(),
+        );
+    }
+    if let Some(first) = requests.first() {
+        let conn = connection(&state, &first.connection_id).await?;
+        if conn.driver_id() == "clickhouse"
+            && requests.iter().all(|request| {
+                request.connection_id == first.connection_id
+                    && request.database == first.database
+                    && request.namespace == first.namespace
+                    && request.object == first.object
+                    && request.kind == RowChangeKind::Insert
+            })
+        {
+            let schema = conn
+                .describe_object(&first.database, first.namespace.as_deref(), &first.object)
+                .await
+                .map_err(|error| error.to_string())?;
+            let mut validated = requests;
+            for request in &mut validated {
+                prepare_row_change(&schema, request).map_err(|error| error.to_string())?;
+            }
+            let count = validated.len();
+            let response = conn
+                .apply_row_changes(validated)
+                .await
+                .map_err(|error| error.to_string())?;
+            if response.results.len() != count {
+                return Err(format!(
+                    "ClickHouse batch returned {} results; expected {count}",
+                    response.results.len()
+                ));
+            }
+            return Ok(response);
+        }
+    }
+
     let started = std::time::Instant::now();
     let mut results = Vec::new();
     let mut schemas: std::collections::HashMap<String, ObjectSchema> =
@@ -565,16 +673,62 @@ pub async fn apply_row_changes(
         );
         if !schemas.contains_key(&key) {
             let schema = conn
-                .describe_object(&request.database, request.namespace.as_deref(), &request.object)
+                .describe_object(
+                    &request.database,
+                    request.namespace.as_deref(),
+                    &request.object,
+                )
                 .await
                 .map_err(|e| e.to_string())?;
             schemas.insert(key.clone(), schema);
         }
-        prepare_row_change(&schemas[&key], &mut request).map_err(|e| e.to_string())?;
-        let response = conn
-            .apply_row_change(request)
-            .await
-            .map_err(|e| e.to_string())?;
+        prepare_row_change(&schemas[&key], &mut request).map_err(|e| {
+            format!(
+                "row {} failed after {} successful rows: {e}",
+                results.len() + 1,
+                results.len()
+            )
+        })?;
+        let response = if conn.driver_id() == "clickhouse" && request.kind == RowChangeKind::Insert
+        {
+            // Validation has already resolved the table schema and checked every identifier.
+            // Defer ClickHouse inserts until the full vector can use its streaming format API.
+            let response = conn.apply_row_change(request).await.map_err(|e| {
+                format!(
+                    "row {} failed after {} successful rows: {e}",
+                    results.len() + 1,
+                    results.len()
+                )
+            })?;
+            response
+        } else {
+            conn.apply_row_change(request).await.map_err(|e| {
+                format!(
+                    "row {} failed after {} successful rows: {e}",
+                    results.len() + 1,
+                    results.len()
+                )
+            })?
+        };
+        if let Some(error) = response
+            .results
+            .iter()
+            .find_map(|result| result.error.as_deref())
+        {
+            return Err(format!(
+                "row {} failed after {} successful rows: {error}",
+                results.len() + 1,
+                results.len()
+            ));
+        }
+        if response.results.len() != 1 {
+            return Err(format!(
+                "row {} returned {} results; expected one after {} successful rows",
+                results.len() + 1,
+                response.results.len(),
+                results.len()
+            ));
+        }
         results.extend(response.results);
     }
 

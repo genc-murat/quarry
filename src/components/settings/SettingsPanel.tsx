@@ -120,8 +120,8 @@ export function SettingsPanel() {
       <section className="px-3 pb-6 text-[11px] text-muted-foreground">
         <p className="text-foreground/80">Quarry · 0.1.0</p>
         <p className="mt-1">
-          A modular, themeable database studio. MySQL 5.6 and PostgreSQL ship today; the driver
-          registry makes adding Redis, MongoDB, ClickHouse and more a matter of one adapter.
+          A modular, themeable database studio. MySQL 5.6, PostgreSQL, SQLite and Redis ship today;
+          the driver registry makes adding MongoDB, ClickHouse and more a matter of one adapter.
         </p>
       </section>
     </div>

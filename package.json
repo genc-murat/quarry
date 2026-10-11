@@ -9,6 +9,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "node --test src/lib/*.test.ts",
+    "check:drift": "cargo test --manifest-path src-tauri/Cargo.toml descriptor_snapshot && node --test src/lib/fixtureDrift.test.ts",
     "preview": "vite preview",
     "preview:html": "npm run build && node scripts/build-preview.mjs",
     "icon": "node scripts/generate-icon.mjs src-tauri/app-icon.png && tauri icon src-tauri/app-icon.png --output src-tauri/icons",

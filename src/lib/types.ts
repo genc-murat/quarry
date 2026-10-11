@@ -14,6 +14,7 @@ export type ObjectKind =
   | "materializedView"
   | "collection"
   | "keySpace"
+  | "key"
   | "function"
   | "procedure"
   | "trigger"
@@ -255,6 +256,106 @@ export interface ObjectDetail {
   sizeBytes?: number | null;
   actions: ObjectAction[];
   identifierQuote: string;
+  /** Panels the driver declares for this object, rendered generically. */
+  sections: InspectorSection[];
+}
+
+/** Where a section's body comes from. */
+export type SectionSource = "inline" | "live";
+
+/** How a cell value is formatted. */
+export type SectionFormat = "text" | "number" | "bytes";
+
+/** Which part of a record a column belongs to. */
+export type SectionColumnRole = "meta" | "body";
+
+/** Accent for a value; a per-row value may override its column's tone. */
+export type SectionTone = "neutral" | "success" | "warning" | "danger";
+
+export interface SectionColumn {
+  key: string;
+  label: string;
+  role: SectionColumnRole;
+  format: SectionFormat;
+  tone: SectionTone;
+  /** Suffix appended to the formatted value, e.g. `ms`. */
+  unit?: string | null;
+}
+
+export interface SectionField {
+  label: string;
+  /** `null` renders as an em dash. */
+  value?: string | null;
+}
+
+/**
+ * An operation a section offers. When `param` names a column the action is
+ * rendered once per row and that row's value is sent back as the parameter.
+ */
+export interface SectionAction {
+  id: string;
+  label: string;
+  /** Longer label for the confirmation title; falls back to `label`. */
+  confirmLabel?: string | null;
+  description?: string | null;
+  danger: boolean;
+  param?: string | null;
+  requireParam: boolean;
+}
+
+/** A cell is a plain JSON value, or `{ text, tone }` to accent it per row. */
+export type SectionCell = unknown;
+
+export type SectionBlock =
+  | { type: "fields"; title?: string | null; fields: SectionField[] }
+  | {
+      type: "table";
+      title?: string | null;
+      columns: SectionColumn[];
+      rows: Record<string, SectionCell>[];
+      emptyText?: string | null;
+      actions: SectionAction[];
+    }
+  | {
+      type: "log";
+      title?: string | null;
+      columns: SectionColumn[];
+      rows: Record<string, SectionCell>[];
+      emptyText?: string | null;
+    };
+
+/** One panel in the object inspector, described by the driver itself. */
+export interface InspectorSection {
+  id: string;
+  label: string;
+  source: SectionSource;
+  /** Extra context next to the section title, e.g. `system.query_log`. */
+  hint?: string | null;
+  /** Shown when a `live` body cannot be loaded. */
+  errorHint?: string | null;
+  /** Empty for a `live` section until its body is fetched. */
+  blocks: SectionBlock[];
+  /** Actions that apply to the object rather than to a single row. */
+  actions: SectionAction[];
+}
+
+export interface ObjectSectionRequest {
+  connectionId: string;
+  database: string;
+  namespace?: string | null;
+  object: string;
+  section: string;
+  limit?: number | null;
+}
+
+export interface ObjectSectionActionRequest {
+  connectionId: string;
+  database: string;
+  namespace?: string | null;
+  object: string;
+  section: string;
+  action: string;
+  param?: string | null;
 }
 
 export type RowChangeKind = "insert" | "update" | "delete";
@@ -288,6 +389,18 @@ export interface CreateTableRequest {
   columns: ColumnDefinition[];
   ifNotExists?: boolean | null;
   comment?: string | null;
+  /** ClickHouse only: table engine. Defaults to MergeTree. */
+  engine?: string | null;
+  /** ClickHouse only: sorting key columns (ORDER BY). */
+  orderBy?: string[];
+  /** ClickHouse only: raw SQL partition expression. */
+  partitionBy?: string | null;
+  /** ClickHouse only: raw SQL primary-key expression. */
+  primaryKey?: string | null;
+  /** ClickHouse only: raw SQL TTL expression. */
+  ttl?: string | null;
+  /** ClickHouse only: explicit MergeTree settings. */
+  settings?: string[];
 }
 
 export interface Snippet {
