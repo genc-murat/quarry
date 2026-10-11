@@ -263,6 +263,9 @@ For Redis, pass `QUARRY_TEST_REDIS_HOST` to the same run (optionally `_PORT`, `_
 - **Reply rendering**: a scalar reply becomes a single cell (`value`), scalar arrays become one row
   per element, nested arrays become a `col_1`, `col_2` matrix, and a RESP3 map becomes a
   `field`/`value` table. The `editor.maxRows` limit applies in the same way (the `truncated` flag).
+
+![Redis: the Keys group in the explorer, and a `HGETALL` reply rendered as a field/value table](docs/screenshots/redis-keys-replies.png)
+
 - **Explorer**: keys are listed with `SCAN` (at most **2000** keys / 40 rounds) and shown in the
   `Keys` group; on very large keyspaces the list is a sample, not the whole thing. Clicking a key
   shows a summary of `TYPE`/`TTL`/`<type>LEN`/`STRLEN`; instead of a made-up `CREATE TABLE` the DDL
@@ -286,6 +289,9 @@ For Redis, pass `QUARRY_TEST_REDIS_HOST` to the same run (optionally `_PORT`, `_
 - **Replies**: `find` and `aggregate` cursors are read with `getMore` up to the row limit; the reply
   of other commands is shown as a single row. Top-level fields become columns, nested values stay
   JSON, and BSON types are shown with extended JSON (`$oid`, `$date`…).
+
+![MongoDB: a database's collections, and a `find` reply flattened into a table whose `_id` stays extended JSON](docs/screenshots/mongo-documents.png)
+
 - **Data preview**: `View data` pages through a `find` sorted by `_id` (`skip`/`limit`).
   The ordering is fixed; there is no filter or sort UI.
 - **Schema**: columns are derived from a sample of 200 documents (multiple types are merged; missing
@@ -347,11 +353,15 @@ single `information_schema` query (the default implementation in the trait walks
 one with `describe_object`, which works correctly for every driver). The result is cached under the
 `sessionId||database` key and is not queried again when the editor is reopened.
 
+![Autocomplete after a table alias: the columns of `orders` with their types](docs/screenshots/intellisense-columns.png)
+
 ## Theme
 
 Light / Dark / System plus five color palettes (Indigo, Ocean, Sunset, Forest, Rose). All colors are
 defined with CSS variables in `src/index.css` and switch via `data-palette` and `.dark` selectors;
 the theme choice is stored in `localStorage`.
+
+![Light mode with the Sunset palette, chosen from the settings panel](docs/screenshots/theme-light.png)
 
 ## Query workbench
 
@@ -453,6 +463,8 @@ a PK the button is disabled and states the reason.
 - **Deleting rows:** select a row and hit "Delete" → confirmation dialog.
 - **Save / Cancel:** "Save (n)" sends the pending changes, then refreshes the preview.
 
+![Row editing: an edited cell and a draft row staged for saving, with the pending count on the Save button](docs/screenshots/row-editing.png)
+
 Every change goes to the backend as a typed `RowChangeRequest`; the SQL (`INSERT`/`UPDATE`/`DELETE`)
 is generated in `src-tauri/src/ddl.rs` and values are escaped as `NULL`/number/bool/text. The
 `apply_row_change` command rejects an update/delete that **does not cover the PK**, so the whole
@@ -467,6 +479,9 @@ preview to mock data.
   (empty name, duplicate column, more than one AUTO_INCREMENT, AUTO_INCREMENT that is not a PK are
   rejected) and generates dialect SQL. After creation the object tree refreshes itself through
   `objectsRevision`.
+
+![The New table wizard: the column list and the live SQL preview it generates](docs/screenshots/create-table-wizard.png)
+
 - **Pagination:** in the `View data` preview, **Prev / Next** regenerate `LIMIT … OFFSET …`; the
   range ("201–440") is shown in the preview header. The editor text is updated to the same query.
 - **Type-correct editing:** row values are `coerce`d according to the column type; numeric columns
