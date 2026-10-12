@@ -541,7 +541,10 @@ mod tests {
                     .unwrap_or_else(|| panic!("{} is registered", descriptor.id));
                 let mut value = serde_json::to_value(&descriptor).expect("a descriptor serializes");
                 let map = value.as_object_mut().expect("a descriptor is an object");
-                map.insert("identifierQuote".into(), json!(quote_char(driver.dialect())));
+                map.insert(
+                    "identifierQuote".into(),
+                    json!(quote_char(driver.dialect())),
+                );
                 map.insert(
                     "explainSelect".into(),
                     json!(driver.explain_statement("SELECT 1")),

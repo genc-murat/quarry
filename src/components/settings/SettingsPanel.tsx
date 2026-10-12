@@ -4,6 +4,7 @@ import { Palette } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input, Label, Select } from "@/components/ui/input";
+import { UpdateControl } from "@/components/settings/UpdateControl";
 import { SETTINGS_SECTIONS, readSetting, type PanelField } from "@/lib/settings";
 import { cn } from "@/lib/utils";
 import { useThemeStore } from "@/stores/theme";
@@ -123,6 +124,7 @@ export function SettingsPanel() {
           A modular, themeable database studio. MySQL 5.6, PostgreSQL, SQLite and Redis ship today;
           the driver registry makes adding MongoDB, ClickHouse and more a matter of one adapter.
         </p>
+        <UpdateControl />
       </section>
     </div>
   );

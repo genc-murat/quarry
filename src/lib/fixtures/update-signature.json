@@ -1,0 +1,35 @@
+{
+  "why": [
+    "One signature, verified by both ends of the update path: the release check",
+    "(scripts/minisign.mjs, checked by scripts/minisign.test.mjs) and the verifier",
+    "the app itself calls (minisign-verify through tauri-plugin-updater, checked by",
+    "src-tauri/src/update_signature.rs). A second implementation is only worth",
+    "having if it agrees with the first.",
+    "",
+    "Produced with the real tools over a 26-byte payload, so nothing here is",
+    "guessed: `npx tauri signer generate` and `npx tauri signer sign` with two",
+    "throwaway keys. The project's own signing key is not involved, and a",
+    "signature over a known payload gives nothing away. `publicKey` is the key as",
+    "tauri.conf.json stores it (base64 of the minisign text), `signature` is a",
+    ".sig file's whole contents, and `bundlerComment` was read off a bundle that",
+    "`tauri build` signed, which is where the `version:` field comes from."
+  ],
+  "payload": "quarry update fixture v1\n",
+  "keys": [
+    {
+      "what": "the key the fixture was signed with",
+      "publicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDg5RjkxQjM2NDFDRDBCOTMKUldTVEM4MUJOaHY1aVR1M3VEM3kxMzhTbWl3MkMraFNXbThHLzg1OEVvUE56WW5hOWIrN0JEUjEK",
+      "keyId": "89F91B3641CD0B93",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVTVEM4MUJOaHY1aWJ5ZFdMdmw2Y09lVVNpV2ZtTnpTZ2dSYk5rVGROczNGZ1ZOVkRaS0Q1eFE0VElkQXZjd1lZbEtCUDBLTGpKWEprMzkyOW13Tll0eTlTTHF3ZlVPOGdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNzY0NjI5CWZpbGU6d2l0aC1maXh0dXJlLWtleS5iaW4KMzNxang1amEvczgvcjZrSnVEUWdUM21zb0dJbFl3SUVLUnZvN01ubXR2NGRqbTl4dmVqbE5YNG5BUlZRclhoUlZOakZkcUg2ckRHY2NrbmdoemVSQWc9PQo=",
+      "trustedComment": "timestamp:1791764629\tfile:with-fixture-key.bin"
+    },
+    {
+      "what": "a second, unrelated key over the same payload",
+      "publicKey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDA0MTgzNzY1NDQxMTUyMDIKUldRQ1VoRkVaVGNZQk40QktMRnhQVUxGS3JtcFpPeTE1NmtHOThpVzJsclRwWGNuT3ZsM3dTekwK",
+      "keyId": "0418376544115202",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRQ1VoRkVaVGNZQkN5aW4rbXdYZUVCVCtSTm5jam43S1dLTDFlRUZ3OXVQT20zTDEzT3FRL0Z1VTN0LzNwa3IxOVNKZC9ESXNteTVBZGNiK1BJc2pUczJLc3lSMUhnUHd3PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxNzY0NjI5CWZpbGU6d2l0aC1mb3JlaWduLWtleS5iaW4KbUgzMDY3MmhxcysveU8vRmhRMjBDUGE0cHNUSWY1N2lXeE51Y2xsZmlYNGxXRzM4WEdoWFl1VTFhc21JNEVWUmVGRWpleVEvM3cwK09TZS82dExhREE9PQo=",
+      "trustedComment": "timestamp:1791764629\tfile:with-foreign-key.bin"
+    }
+  ],
+  "bundlerComment": "timestamp:1791764122\tfile:Quarry.app.tar.gz\tversion:0.1.0"
+}

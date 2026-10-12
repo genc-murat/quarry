@@ -1215,9 +1215,6 @@ impl Connection for ClickHouseConnection {
         ))
     }
 
-
-
-
     async fn apply_row_changes(&self, requests: Vec<RowChangeRequest>) -> Result<QueryResponse> {
         if requests.is_empty() {
             return Ok(QueryResponse {

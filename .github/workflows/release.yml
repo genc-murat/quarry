@@ -1,0 +1,121 @@
+name: release
+
+# A tag publishes a release: `git tag v0.2.0 && git push origin v0.2.0`. The tag
+# has to match the app version in src-tauri/tauri.conf.json, because that version
+# names the assets and is what the updater compares against. The workflow can also
+# be started by hand from Actions → release → Run workflow, which publishes the
+# version currently in tauri.conf.json.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Publishing is not idempotent — two runs uploading the same asset names at once
+# would fight over them.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+          - platform: macos-latest
+            args: --target x86_64-apple-darwin
+          - platform: ubuntu-22.04
+            args: ""
+          - platform: windows-latest
+            args: ""
+    runs-on: ${{ matrix.platform }}
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: npm
+
+      # The three version files and the tag have to agree: the updater only takes
+      # an update whose version is newer than its own, so a mismatch would publish
+      # a release that no installed app ever picks up.
+      - name: Check the app version
+        shell: bash
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            node scripts/check-version.mjs "${GITHUB_REF_NAME}"
+          else
+            node scripts/check-version.mjs
+          fi
+
+      # Pinned to a commit on the action's master branch, which is what its
+      # README requires of a SHA pin; the toolchain then has to be named.
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+          # The two macOS bundles are built natively, one per architecture.
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+
+      # Fail on a stale lock file instead of quietly resolving something the tests
+      # never saw, and warm the cache before the build.
+      - run: cargo fetch --locked --manifest-path src-tauri/Cargo.toml
+
+      # 22.04 is the oldest runner with WebKitGTK 4.1, which Tauri 2 links
+      # against; building there keeps the glibc floor of the binaries low.
+      - name: Install the webview and packaging dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+
+      # Install scripts stay on here: the build needs the tauri CLI and the
+      # platform bundlers. `npm run build` (tauri's beforeBuildCommand) typechecks
+      # the frontend on the way, so a broken build cannot reach a release.
+      - run: npm ci
+
+      - uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Signs every updater artifact; the public half of this key is the
+          # `plugins.updater.pubkey` in src-tauri/tauri.conf.json. Without the
+          # secret the updater artifacts are produced unsigned and install fails.
+          # Scoped to this step so the dependency install above never sees it.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: v__VERSION__
+          releaseName: "Quarry v__VERSION__"
+          releaseBody: |
+            Desktop builds for macOS (Apple Silicon and Intel), Linux (x64) and Windows (x64).
+
+            Quarry updates itself from this release: the manifest the in-app updater reads
+            (`latest.json`) and the signed bundles it installs are attached below.
+          # A draft leaves the release one last look; publishing it is what makes it
+          # the "latest" release the updater endpoint resolves.
+          releaseDraft: true
+          prerelease: false
+          # NSIS is the Windows bundle the updater can install without a UI.
+          updaterJsonPreferNsis: true
+          includeUpdaterJson: true
+          args: ${{ matrix.args }}

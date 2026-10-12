@@ -101,8 +101,8 @@ src-tauri/
     sql_split.rs       # quote/comment-aware SQL splitter (+ tests)
 src/
   components/          # layout, ui, connections, explorer, query, objects, history, snippets, settings
-  lib/                 # typed IPC, types, dev mock (fixtures + reply mapping), helpers
-  stores/              # theme + workspace state
+  lib/                 # typed IPC, updater, types, dev mock (fixtures + reply mapping), helpers
+  stores/              # theme + workspace + updater state
   theme/               # palette definitions
 ```
 
@@ -113,6 +113,13 @@ npm install
 npm run tauri:dev      # run the desktop app in development mode
 npm run tauri:build    # produce a signed/packaged application
 ```
+
+> **A packaged build needs the updater key.** `bundle.createUpdaterArtifacts` is on, so
+> `npm run tauri:build` signs the update bundles and fails without
+> `TAURI_SIGNING_PRIVATE_KEY` (for `build`/`bundle` this may be the key's contents *or* a path to
+> the key file) — see [Updates and releases](#updates-and-releases). `npm run tauri:build -- --debug`
+> behaves the same way; pass `-- --config '{"bundle":{"createUpdaterArtifacts":false}}'` for a
+> throwaway local bundle you do not intend to ship.
 
 To work on the UI only:
 
@@ -134,16 +141,25 @@ npm run dev            # http://localhost:1420 — opens in the browser with dem
 
 ```bash
 npm run typecheck                      # tsc --noEmit
-npm test                               # node:test — src/lib helpers and src/components
+npm test                               # node:test — src/lib helpers, src/components, scripts
+npm run check:version                  # package.json ↔ Cargo.toml ↔ tauri.conf.json
 npm run build                          # tsc + vite build
 cargo test  --manifest-path src-tauri/Cargo.toml
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
 
 Because SQLite is embedded, the driver tests (with `:memory:` and a temporary file) run in the
-normal test run **without a server**. The typecheck plus `npm test` half of this list runs on every
-push and pull request (`.github/workflows/test.yml`); the cargo steps need a Rust toolchain and
-stay local for now.
+normal test run **without a server**. All of the list above runs on every push and pull request
+(`.github/workflows/test.yml`): the `js` job does the version check, the typecheck and `npm test`,
+the `rust` job does
+`cargo fmt --check`, `cargo clippy`, `cargo test` and then the frontend half of the drift check
+(the webview and packaging libraries are installed first, since even `cargo check` links them).
+The cargo steps run `--locked`, so a Cargo.toml change without a matching lock file fails the run
+instead of silently resolving something the tests never saw. Clippy lints are reported but not
+fatal — the tree still carries a handful of pre-existing ones — while `cargo fmt --check` and
+`npm run check:version` are hard gates. Every action in both workflows is pinned to a commit SHA
+(a moved tag in the release job would be a way to ship a signed malicious update); Dependabot
+proposes the upgrades (`.github/dependabot.yml`).
 
 **Component tests.** `npm test` also renders React components and asserts on what they produce
 (`src/**/*.test.tsx`), so a UI regression is caught by the suite instead of by a hand-run browser.
@@ -503,6 +519,203 @@ preview to mock data.
   - **Safety:** confirm row deletes, unsaved-changes warning, block UPDATE/DELETE without WHERE.
   - **General:** type-the-name confirmation for destructive operations, notification duration.
   - **Restore defaults** button returns all settings to their defaults.
+  - **About:** the version, and the update check. It asks the release endpoint whether a newer
+    version exists, shows the release notes, downloads and installs it with a progress bar and
+    restarts Quarry into it (`src/lib/updater.ts`).
+
+## Updates and releases
+
+Quarry updates itself from its own GitHub releases. The pieces:
+
+- **The shell half** is `tauri-plugin-updater` plus `tauri-plugin-process`, registered in
+  `src-tauri/src/lib.rs` and granted exactly three permissions in
+  `src-tauri/capabilities/default.json` (`updater:allow-check`, `updater:allow-download-and-install`,
+  `process:allow-restart`). The endpoint and the public key live in
+  `src-tauri/tauri.conf.json` under `plugins.updater`; the manifest it reads is the `latest.json`
+  attached to the newest release
+  (`https://github.com/genc-murat/quarry/releases/latest/download/latest.json`).
+- **The frontend half** is `src/lib/updater.ts` — a gateway the shell implements and a state machine
+  (`idle → checking → available → downloading → installing`) that the settings panel renders. The
+  panel is only one of its readers-to-be, so the state lives in `src/stores/updater.ts` and survives
+  switching sidebar tabs. `src/lib/updater.test.ts` drives the state machine with a fake gateway, so
+  the phases, the progress reporting and "a failed install never restarts the app" are pinned
+  without a shell or a network.
+- **Signing** is mandatory for updates: the updater verifies every artifact against the public key in
+  the config, so both ends have to come from the same key pair. Generate it once and keep the private
+  half out of the repository (`.gitignore` covers `*.key`):
+
+  ```bash
+  npm run tauri signer generate -- -w ~/.tauri/quarry.key
+  ```
+
+  The command prints the public key and writes it next to the private key (`~/.tauri/quarry.key.pub`);
+  paste it verbatim into `plugins.updater.pubkey`. Losing either half means existing installations can
+  no longer be updated, so back the pair up.
+
+### Checking that an update actually installs
+
+The unit tests cover the state machine, but none of them can tell you whether a signer's artifact, a
+hosted manifest and an installed copy survive each other — that path only exists once there are two
+real versions. `npm run e2e:update` builds them:
+
+```bash
+npm run e2e:update                     # the version in tauri.conf.json, and the patch after it
+npm run e2e:update -- --next 0.2.0 --keep
+npm run e2e:update -- --report         # every platform's contract, and build nothing
+```
+
+It builds the current version and the next one, serves the newer signed artifact from a local HTTP
+server, prepares a copy of the older build the way that platform installs it, and launches it. Three
+phases run against a fresh copy, and each one has to end the way it is supposed to:
+
+1. an honest artifact and signature — the app installs it, restarts, and comes back reporting the new
+   version *and its own bundle type*, which is how the run knows the restarted process is the new
+   build;
+2. a tampered artifact carrying the honest signature — the install is refused and the copy on disk is
+   byte for byte what it was;
+3. an honest artifact signed with a fresh, untrusted key — the same refusal.
+
+The last two are the reason the check exists in this shape. The endpoint is public and its manifest is
+anyone's to rewrite, so an app that installs whatever it downloads passes phase 1 just as happily with
+verification disabled; only a payload that *must* be refused shows that it is not.
+
+**What differs per platform** is data, in `scripts/updatePlatforms.mjs` — `--report` prints it and
+`scripts/updatePlatforms.test.mjs` pins it against the spellings the updater itself uses
+(`BundleType` in tauri-utils, the key order in `Updater::get_urls`):
+
+| | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| bundle to build | `--bundles app` | `--bundles appimage` | `--bundles nsis` |
+| updater artifact | `Quarry.app.tar.gz` | `Quarry_<v>_amd64.AppImage.tar.gz` | `Quarry_<v>_x64-setup.nsis.zip` (or the `.exe`) |
+| manifest keys | `darwin-aarch64-app`, then `darwin-aarch64` | `linux-x86_64-appimage`, then `linux-x86_64` | `windows-x86_64-nsis`, then `windows-x86_64` |
+| the installed copy is | the `.app` bundle | the AppImage file itself | whatever its own NSIS installer left |
+
+What that means in practice:
+
+- **macOS** replaces the bundle in place, and our frontend restarts the app afterwards. It is also the
+  one platform where the updater refuses to start at all if the path to the executable contains a
+  symlink (`StartingBinary` checks it on macOS and nowhere else), which rules out `/tmp` and `/var`.
+  The script checks that up front rather than failing later with the plugin's wording.
+- **Linux** only works as an AppImage: the updater unpacks the `.AppImage` out of the tarball and
+  writes it over the file the `APPIMAGE` variable names. A build run from `target/debug`, an extracted
+  AppImage directory, or a `.deb`/`.rpm` install all take other paths. Opening a window needs
+  WebKitGTK and a display, so a headless runner cannot do this.
+- **Windows** needs an *installed* copy — the check installs the old version with its own installer
+  (`/S`) before launching it. The update then runs that installer and the app exits from inside
+  `downloadAndInstall`, so `process.relaunch` never runs there: the installer restarts the app itself
+  (`restart_after_install` defaults to true, which passes `/R`). The mode comes from
+  `plugins.updater.windows.installMode` — this project sets `passive` (`/P`); `basicUi` leaves the
+  restart out entirely. NSIS installs per user by default (`currentUser`, HKCU), so nothing needs
+  elevating. An unsigned installer is what SmartScreen warns about, which is outside this check.
+- **Everywhere:** the manifest keys are tried in the order above, and setting `plugins.updater.target`
+  replaces that whole list with the single target it names. The check serves http on loopback, which a
+  *release* build refuses without `dangerousInsecureTransportProtocol` (a debug build only warns), and
+  the probe reports over the app's own CSP, so a run widens `connect-src` with its origin.
+
+The click itself comes from `src/lib/updateProbe.ts`, which is compiled in only when the build sets
+`VITE_UPDATE_PROBE=1` (with `VITE_UPDATE_PROBE_URL`): Vite inlines the guard, so a normal build drops
+the branch and ships nothing extra. The probe reports each step to the test server because the
+webview's console is not visible from outside the app.
+
+It needs a GUI session and the updater signing key (`TAURI_SIGNING_PRIVATE_KEY`, or
+`~/.tauri/quarry.key`), and it builds two debug bundles, so a cold Rust target directory makes it slow
+— which is why it is not part of CI. Only the macOS half has been run so far; the Linux and Windows
+halves are written from the contracts above and a green run on those has to come from that OS.
+
+### Checking a release that is already published
+
+The e2e check above installs a build it made itself with a key it generated itself, so it answers
+"does the update path work" and says nothing about the release that is actually published: whose
+keys, whose signatures, whose artifacts. `npm run check:release` reads that one:
+
+```bash
+npm run check:release                            # the endpoint configured in tauri.conf.json
+npm run check:release -- --expect v0.2.0         # ... and the version the tag promised
+npm run check:release -- --manifest ./latest.json   # a manifest that is not published yet
+npm run check:release -- --only darwin-aarch64   # one platform's artifact
+npm run check:release -- --no-artifacts          # the manifest alone, downloading nothing
+```
+
+It downloads the manifest, judges it against the platforms `.github/workflows/release.yml` builds
+(which it reads from the workflow, so a platform the matrix gains cannot be left out silently), then
+downloads every artifact it names and verifies each one against the public key in
+`plugins.updater.pubkey`:
+
+- every key has to be one an app actually looks up, every platform the workflow built has to have an
+  entry, and each entry has to point at *that platform's* artifact rather than at another one's;
+- an artifact whose name carries a version other than the manifest's is flagged, which is what catches
+  a manifest pointing at the previous release's file;
+- the signature is verified against the configured key, with the key id compared *first* — so a release
+  signed by someone else's key reports whose key it was instead of "verification failed";
+- the trusted comment has to name this artifact and, when the bundler wrote a version into it, this
+  version — that comment is the part the second signature covers;
+- the `.sig` asset published next to the artifact has to say the same thing as the manifest, because a
+  release carrying two different signatures for one artifact has one that is wrong.
+
+It exits 0 when everything verified, 1 when something about the release is wrong, and 2 when the check
+itself could not be run — nothing published at that endpoint yet, no key configured, no network. A
+release with nothing at its endpoint is not a broken release, and saying so differently is the point
+of the third code.
+
+The pieces are separate because they fail differently, and both of the first two are checked without a
+network: `scripts/minisign.mjs` is the signature format (pinned to real `tauri signer` output in
+`scripts/minisign.test.mjs`, which is where "prehashed" and what the second signature covers were read
+off), `scripts/releaseManifest.mjs` is the manifest rules, and `scripts/check-release.mjs` is the one
+that downloads. Both suites run in CI with the rest.
+
+The check is a second implementation of something the app already contains — `tauri-plugin-updater`
+hands the artifact and the signature to `minisign-verify` — so the two have to agree, and the parts
+that could silently disagree are the ones read off real output: whether `ED` means the digest or the
+artifact, and what the trailing signature covers. `src/lib/fixtures/update-signature.json` is a real
+`tauri signer` key pair and signature over a 26-byte payload, read by both halves:
+`scripts/minisign.test.mjs` verifies it with `scripts/minisign.mjs`, and
+`src-tauri/src/update_signature.rs` verifies it with the same verifier and the same steps the plugin
+uses, `--locked` pulled from one resolved version of `minisign-verify`. Both assert the same outcome on
+the same bytes, the refusals included (another key, a changed byte), so "the release check would accept
+this" and "the app would install this" cannot drift apart; a `cargo test` run is where that half is
+checked. The fixture is also what caught the key id being printed in the wrong byte order, which had
+made the report disagree with the pubkey's own comment.
+
+What it cannot check is the two things that are not in the release: whether the build was code-signed
+and notarized, and whether an *installed* copy updates itself. That second one is `npm run e2e:update`.
+
+### Cutting a release
+
+1. Bump the version in **three** places: `package.json`, `src-tauri/Cargo.toml` and
+   `src-tauri/tauri.conf.json` (the last one is what names the assets and what the updater compares),
+   then check they agree with `npm run check:version`.
+2. Commit, then tag and push: `git tag v0.2.0 && git push origin v0.2.0`.
+3. Publish the draft the workflow leaves behind, then run `npm run check:release -- --expect v0.2.0`
+   once: publishing is what makes the release the one the endpoint serves, so it is the first moment
+   the artifacts can be verified the way an installed app will.
+
+`.github/workflows/release.yml` then builds four bundles — macOS arm64, macOS x64, Linux x64 and
+Windows x64 — and `tauri-action` attaches them next to the artifacts the app itself installs: the
+macOS `.app.tar.gz`, the Linux `.AppImage.tar.gz` and the Windows NSIS `-setup.exe` (the manifest is
+told to prefer NSIS over the `.msi`), each with the `.sig` that the updater verifies against the
+public key, plus the `latest.json` that ties them together. Before any of that it runs
+`scripts/check-version.mjs` (the same file CI runs), so a tag that disagrees with either the three
+version files or their lock files stops the release instead of publishing a version no installed app
+ever picks up.
+
+The release is created as a **draft**: publishing it is what makes it the "latest" release the updater
+endpoint resolves, so an unreviewed build never reaches an installed app. The workflow can also be
+started by hand (Actions → release → Run workflow), which publishes whatever version is in
+`tauri.conf.json`.
+
+The two secrets it needs (Settings → Secrets and variables → Actions):
+
+| Secret | Value |
+| --- | --- |
+| `TAURI_SIGNING_PRIVATE_KEY` | The contents of `~/.tauri/quarry.key` (the workflow reads the variable, not the file) |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | The key's password; empty if the key was generated without one |
+
+Code signing is a **separate** concern from updater signing: the updater's own signature is already
+enforced by the key pair above, but a macOS build without an Apple Developer ID certificate is not
+notarized (Gatekeeper warns, and an arm64 download can be reported as damaged), and an unsigned
+Windows build collects SmartScreen warnings. Adding `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`,
+`APPLE_SIGNING_IDENTITY`, `APPLE_ID`, `APPLE_PASSWORD` and `APPLE_TEAM_ID` (macOS) or a Windows
+certificate to that workflow's `env` is all the packaging side needs.
 
 ## Known limitations / next steps
 
@@ -556,6 +769,12 @@ preview to mock data.
 - SQLite returns `supportsMultipleDatabases: false` and `supportsCancel: false`; differences such as
   `ALTER COLUMN`, `VACUUM` and index kind are also reflected in the dialogs' live SQL preview
   (`dialectForDriver` in `src/lib/objects.ts`).
+- The update flow is verified against a fake gateway in tests and by a real signed local bundle; a
+  genuine end-to-end update (an older build picking up a published release) needs two published
+  releases and has not been exercised.
+- Releases are unsigned at the OS level: see the note in [Updates and releases](#updates-and-releases)
+  about Apple notarization and Windows SmartScreen, and the releases are drafts until they are
+  published by hand.
 - ERD visualization is still on the roadmap.
 - The completion tree is fed at most 400 tables; on very large schemas the remaining tables are
   skipped (the editor stays responsive).
@@ -564,8 +783,10 @@ preview to mock data.
 
 | Command | What it does |
 | --- | --- |
-| `npm test` | Verifies the `src/lib` helpers with Node's built-in test runner: settings registry, schema diff, row-edit shell, explorer tree, inspector section load order, the Redis/Mongo reply→table mapping, the consistency of the per-engine mock fixtures with the adapters, and the drift check of the mock fixtures against the Rust driver declarations. It also renders `src/components` (`.test.tsx` files, via `scripts/tsx-loader.mjs`), mounting them into jsdom over a scripted backend (`src/lib/testBackend.ts`, `src/lib/testRender.tsx`) so strokes like Connect can be driven from a test |
+| `npm test` | Verifies the `src/lib` helpers (and `scripts/*.test.mjs`, which pin the per-platform update contract) with Node's built-in test runner: settings registry, schema diff, row-edit shell, explorer tree, inspector section load order, the Redis/Mongo reply→table mapping, the consistency of the per-engine mock fixtures with the adapters, and the drift check of the mock fixtures against the Rust driver declarations. It also renders `src/components` (`.test.tsx` files, via `scripts/tsx-loader.mjs`), mounting them into jsdom over a scripted backend (`src/lib/testBackend.ts`, `src/lib/testRender.tsx`) so strokes like Connect can be driven from a test |
 | `npm run check:drift` | Runs the drift check with both halves: Rust registry ↔ `src/lib/fixtures/driver-descriptors.json` ↔ `src/lib/mockFixtures.ts` (capabilities, fields + quote character and the `EXPLAIN` reply) |
+| `npm run check:version` | Verifies that `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` declare the same version; with an argument (`npm run check:version -- v0.2.0`) it also checks the release tag |
+| `npm run e2e:update` | Builds two real bundles and has the older app update itself from a local server, then repeats that with a tampered artifact and with a signature from a foreign key, both of which must be refused (`scripts/e2e-update.mjs`, contracts in `scripts/updatePlatforms.mjs`; `--report` prints what each platform's path consists of). Needs a GUI session and the updater signing key; two debug builds make it too slow for CI |
 | `npm run icon` | Renders the icon (`scripts/generate-icon.mjs`) and produces all platform sizes (`icns`, `ico`, Android/iOS) |
 | `npm run preview:html` | Bundles the app as a single-file `preview.html` (for inspecting in a browser) |
 | `node scripts/build-icon-sheet.mjs` | Produces `icon-sheet.html` showing the icon at 512/256/128/64/32 px on light and dark backgrounds |

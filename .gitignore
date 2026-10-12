@@ -22,5 +22,10 @@ src-tauri/gen
 .env
 .env.local
 
+# Updater signing keys — `npm run tauri signer generate` writes the private key
+# outside the repo by convention (~/.tauri/quarry.key), never commit one here.
+*.key
+*.key.pub
+
 # Freebuff local app state
 .freebuff

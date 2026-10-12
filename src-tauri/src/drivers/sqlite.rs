@@ -501,7 +501,6 @@ impl Connection for SqliteConnection {
             total_ms: started.elapsed().as_millis() as u64,
         })
     }
-
 }
 
 async fn run_statement(

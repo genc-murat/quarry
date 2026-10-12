@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Quarry — a modular, themeable database studio"
 authors = ["Quarry"]
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.90"
 
 [lib]
 name = "quarry_lib"
@@ -49,6 +49,18 @@ clickhouse = { version = "0.13", default-features = false, features = [
   "rustls-tls-ring",
   "rustls-tls-native-roots",
 ] }
+
+# Update delivery is a desktop concern: the updater reads a release manifest and
+# the process plugin restarts the app into the version it just installed.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
+
+[dev-dependencies]
+# The verifier `tauri-plugin-updater` calls, so a test can check the release
+# check's signature fixture with the same code the app runs rather than with a
+# second reading of the format. Cargo resolves one version for both.
+minisign-verify = "0.3"
 
 [features]
 # Used by tauri-build to enable the custom protocol on mobile targets.

@@ -13,6 +13,10 @@ mod secrets;
 mod session;
 mod sql_split;
 mod store;
+// Test-only: it pins the release check's signature fixture against the verifier
+// the updater plugin calls, so the check and the app cannot drift apart.
+#[cfg(test)]
+mod update_signature;
 
 use std::sync::Arc;
 
@@ -44,6 +48,15 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(|app| {
+            // Self-updates are desktop-only: the mobile stores own delivery, so
+            // the plugins are neither compiled nor registered there.
+            #[cfg(desktop)]
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_process::init())?;
+            }
+
             let config_dir = app
                 .path()
                 .app_config_dir()
