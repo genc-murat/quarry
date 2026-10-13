@@ -17,6 +17,7 @@ import type {
   ConnectionProfile,
   CreateTableRequest,
   DriverDescriptor,
+  ImportConnectionsSummary,
   NamespaceInfo,
   ObjectActionRequest,
   ObjectSectionActionRequest,
@@ -329,6 +330,17 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       return respond(FIXTURES.map((entry) => entry.driver) satisfies DriverDescriptor[]);
     case "list_connections":
       return respond(FIXTURES.map((entry) => entry.profile) satisfies ConnectionProfile[]);
+    // The browser has no disk and no second machine. Export still reports the
+    // connections it would have written, and an import answers as one would
+    // when the file came from here: everything in it is already in the list.
+    case "export_connections":
+      return respond(FIXTURES.length);
+    case "import_connections":
+      return respond({
+        imported: 0,
+        skipped: FIXTURES.length,
+        unsupported: [],
+      } satisfies ImportConnectionsSummary);
     case "list_sessions":
       // MySQL stays first so the default demo session is unchanged; every other
       // engine is reachable from the session picker.

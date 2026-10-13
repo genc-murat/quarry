@@ -12,6 +12,9 @@ interface Props {
   /** Body content, e.g. the SQL that will run. */
   children?: React.ReactNode;
   confirmLabel?: string;
+  /** Label of the dismissing action; "Later" reads better than "Cancel" for an
+   *  offer the user can simply decline for now. */
+  cancelLabel?: string;
   destructive?: boolean;
   /** When set, the user must type this exact text to enable confirmation. */
   requireText?: string;
@@ -26,6 +29,7 @@ export function ConfirmDialog({
   description,
   children,
   confirmLabel = "Confirm",
+  cancelLabel = "Cancel",
   destructive = false,
   requireText,
   busy = false,
@@ -50,7 +54,7 @@ export function ConfirmDialog({
       footer={
         <>
           <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
-            Cancel
+            {cancelLabel}
           </Button>
           <Button
             size="sm"

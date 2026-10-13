@@ -18,6 +18,7 @@ import {
   Plug,
   Plus,
   RefreshCw,
+  Save,
   Server,
   Table2,
   Trash2,
@@ -27,9 +28,11 @@ import {
 } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { ContextMenu, type MenuEntry } from "@/components/ui/context-menu";
 import { Dialog } from "@/components/ui/dialog";
 import { Input, Label } from "@/components/ui/input";
+import { ConnectionDialog } from "@/components/connections/ConnectionDialog";
 import { CreateTableDialog } from "@/components/objects/CreateTableDialog";
 import { errorMessage, ipc } from "@/lib/ipc";
 import { explorerTree, touchExplorerTree } from "@/lib/explorerTree";
@@ -122,6 +125,22 @@ type ExplorerMenu =
   | { kind: "session"; x: number; y: number; sessionId: string }
   | { kind: "profile"; x: number; y: number; profileId: string };
 
+/**
+ * Why the explorer opens the connection dialog. The two cases end differently —
+ * the new profile is handed back to the session it was saved from, while an
+ * edited one leaves its session on the old settings — so they are a union rather
+ * than a bag of optional fields that could be set in the wrong combination.
+ */
+type ConnectionDialogRequest =
+  | {
+      mode: "create";
+      /** The ad-hoc session the new profile is handed back to. */
+      sessionId: string;
+      /** What that session was opened with, as the form's starting values. */
+      prefill: Partial<ConnectionProfile>;
+    }
+  | { mode: "edit"; editing: ConnectionProfile };
+
 /** Split a cache key; null for a connection root or any key without a database. */
 function treeParts(
   key: string,
@@ -138,10 +157,14 @@ export function ExplorerPanel() {
   const databasesBySession = useWorkspace((s) => s.databasesBySession);
   const objectsRevision = useWorkspace((s) => s.objectsRevision);
   const profiles = useWorkspace((s) => s.profiles);
+  const reconnectOnLaunch = useWorkspace((s) => s.settings.general.reconnectOnLaunch);
   const rememberedProfileIds = useWorkspace((s) => s.rememberedProfileIds);
+  const adhocConfigs = useWorkspace((s) => s.adhocConfigs);
   const loadDatabases = useWorkspace((s) => s.loadDatabases);
   const setActiveSession = useWorkspace((s) => s.setActiveSession);
   const connectProfile = useWorkspace((s) => s.connectProfile);
+  const bindSessionToProfile = useWorkspace((s) => s.bindSessionToProfile);
+  const offerReconnect = useWorkspace((s) => s.offerReconnect);
   const forgetProfile = useWorkspace((s) => s.forgetProfile);
   const disconnect = useWorkspace((s) => s.disconnect);
   const loadObjectDetail = useWorkspace((s) => s.loadObjectDetail);
@@ -157,6 +180,10 @@ export function ExplorerPanel() {
   // password the explorer was never given.
   const [connectingProfileId, setConnectingProfileId] = useState<string | null>(null);
   const [passwordFor, setPasswordFor] = useState<ConnectionProfile | null>(null);
+  // The connection dialog the explorer opens: editing the profile a session came
+  // from, or saving an ad-hoc session as a new connection. A fresh object each
+  // time, so the dialog resets only when it is opened again.
+  const [connectionDialog, setConnectionDialog] = useState<ConnectionDialogRequest | null>(null);
   // Which object-kind groups are collapsed. Absent means open, so a freshly
   // loaded database shows every group expanded.
   const [groupOpen, setGroupOpen] = useState<Record<string, boolean>>(explorerTree.groupOpen);
@@ -204,9 +231,11 @@ export function ExplorerPanel() {
    * Servers that were open last time but are not open now: a restore that could
    * not run without a password, or a server that was down when the app started.
    * They are offered as dimmed roots so the connection the user had is still
-   * one click away instead of being hidden in the connection list.
+   * one click away instead of being hidden in the connection list. With
+   * "Reconnect on launch" off nothing about the last session is offered at all,
+   * so the remembered list is not even read.
    */
-  const pendingProfiles = rememberedProfileIds
+  const pendingProfiles = (reconnectOnLaunch ? rememberedProfileIds : [])
     .map((id) => profiles.find((profile) => profile.id === id))
     .filter((profile): profile is ConnectionProfile => Boolean(profile))
     .filter((profile) => !sessions.some((session) => session.profileId === profile.id));
@@ -244,15 +273,17 @@ export function ExplorerPanel() {
     [pushToast],
   );
 
-  // Re-read every node the user currently has expanded — across every open
-  // connection — so objects created by another client (or a table added
-  // out-of-band) show up without a manual Refresh. Shared by the
-  // focus/visibility handler and the mutation-revision effect below.
-  const refreshExpanded = useCallback(async () => {
+  // Re-read every node the user currently has expanded so objects created by
+  // another client (or a table added out-of-band) show up without a manual
+  // Refresh. Shared by the focus/visibility handler and the mutation-revision
+  // effect below; `onlySessionId` limits it to one connection, which is what the
+  // focus refresh uses so it cannot fan out over every open server.
+  const refreshExpanded = useCallback(async (onlySessionId?: string) => {
     const openTrees = Object.keys(expanded)
       .filter((key) => expanded[key])
       .map((key) => treeParts(key))
-      .filter((parts): parts is NonNullable<typeof parts> => parts !== null);
+      .filter((parts): parts is NonNullable<typeof parts> => parts !== null)
+      .filter((parts) => !onlySessionId || parts.sessionId === onlySessionId);
     if (openTrees.length === 0) return;
     // Drop the cached nodes of every connection being re-read, so a database
     // dropped server-side does not linger in the tree.
@@ -293,9 +324,14 @@ export function ExplorerPanel() {
       const now = Date.now();
       if (now - lastFocusRefresh.current < 1500) return;
       lastFocusRefresh.current = now;
-      for (const entry of sessions) void loadDatabases(entry.id);
-      // Also re-read the tables/views inside every expanded node.
-      void refreshExpanded();
+      // Only the connection the user is looking at: re-reading every open server
+      // on each focus was N database reads for N connections. The others get
+      // theirs from their own Refresh in the root's context menu, or from the
+      // toolbar's "Refresh all connections".
+      if (!activeSessionId) return;
+      void loadDatabases(activeSessionId);
+      // Also re-read the tables/views inside that connection's expanded nodes.
+      void refreshExpanded(activeSessionId);
     };
     window.addEventListener("focus", refreshIfVisible);
     document.addEventListener("visibilitychange", refreshIfVisible);
@@ -303,7 +339,7 @@ export function ExplorerPanel() {
       window.removeEventListener("focus", refreshIfVisible);
       document.removeEventListener("visibilitychange", refreshIfVisible);
     };
-  }, [sessions, loadDatabases, refreshExpanded]);
+  }, [sessions, activeSessionId, loadDatabases, refreshExpanded]);
 
   // A mutation elsewhere (rename/drop/column edit/row edit) bumps the revision;
   // refetch every expanded node so the tree never shows a stale table.
@@ -446,6 +482,32 @@ export function ExplorerPanel() {
               onSelect: () => setActiveSession(target.id),
             },
           ]),
+      // A session with no profile behind it still has to become a connection;
+      // one that came from a profile can have its stored settings changed.
+      ...(target.profileId
+        ? [
+            {
+              label: "Edit connection…",
+              icon: <Pencil className="h-3.5 w-3.5" />,
+              onSelect: () => {
+                const profile = profiles.find(
+                  (candidate) => candidate.id === target.profileId,
+                );
+                if (profile) setConnectionDialog({ mode: "edit", editing: profile });
+              },
+            },
+          ]
+        : [
+            {
+              label: "Save this connection…",
+              icon: <Save className="h-3.5 w-3.5" />,
+              onSelect: () => {
+                const values = prefillFor(target.id);
+                if (values)
+                  setConnectionDialog({ mode: "create", sessionId: target.id, prefill: values });
+              },
+            },
+          ]),
       { type: "separator" },
       {
         label: "Disconnect",
@@ -454,6 +516,27 @@ export function ExplorerPanel() {
         onSelect: () => void disconnect(target.id),
       },
     ];
+  }
+
+  /**
+   * What a profile-less session was opened with, shaped for the connection
+   * dialog. The session only knows its name and what the server reports, so the
+   * host and port come from the config it was opened with.
+   */
+  function prefillFor(sessionId: string): Partial<ConnectionProfile> | null {
+    const session = sessions.find((s) => s.id === sessionId);
+    if (!session) return null;
+    const config = adhocConfigs[sessionId];
+    return {
+      driver: session.driver,
+      name: session.name,
+      host: config?.host ?? "",
+      port: config?.port ?? 0,
+      username: config?.username ?? session.server.currentUser ?? "",
+      database: config?.database ?? session.server.currentDatabase ?? null,
+      sslMode: config?.sslMode ?? "preferred",
+      options: config?.options ?? {},
+    };
   }
 
   /** What right-clicking a dimmed, remembered connection offers. */
@@ -940,14 +1023,46 @@ export function ExplorerPanel() {
           profile={passwordFor}
           busy={connectingProfileId === passwordFor.id}
           onClose={() => setPasswordFor(null)}
-          onSubmit={async (password) => {
+          onSubmit={async (password, rememberPassword) => {
             setConnectingProfileId(passwordFor.id);
-            const session = await connectProfile(passwordFor.id, password || undefined);
+            const session = await connectProfile(
+              passwordFor.id,
+              password || undefined,
+              rememberPassword,
+            );
             setConnectingProfileId(null);
             // A failed attempt keeps the dialog open so the password can be
             // corrected instead of starting over.
             if (session) setPasswordFor(null);
           }}
+        />
+      ) : null}
+
+      {connectionDialog?.mode === "create" ? (
+        <ConnectionDialog
+          open
+          mode="create"
+          prefill={connectionDialog.prefill}
+          // Saving an ad-hoc session is only half of it: the live session becomes
+          // that connection, so it is not offered for saving again and comes back
+          // on the next launch. The profile was built from that very session, so
+          // the live connection already matches it — nothing to reconnect.
+          onSaved={(profile) =>
+            void bindSessionToProfile(connectionDialog.sessionId, profile.id)
+          }
+          onClose={() => setConnectionDialog(null)}
+        />
+      ) : null}
+
+      {connectionDialog?.mode === "edit" ? (
+        <ConnectionDialog
+          open
+          mode="edit"
+          editing={connectionDialog.editing}
+          // The session for the profile that was just rewritten is now stale, so
+          // the app offers to reopen it with the new settings.
+          onSaved={(profile) => offerReconnect(profile.id)}
+          onClose={() => setConnectionDialog(null)}
         />
       ) : null}
 
@@ -975,9 +1090,11 @@ export function ExplorerPanel() {
 
 /**
  * The one thing the explorer needs from the user before it can open a server it
- * remembers: the password it was never given. Typing it here stores it with the
- * connection — the same thing the connection dialog does — which is what lets
- * the next launch reopen this server without asking.
+ * remembers: the password it was never given. It is tried with the connection
+ * and, unless the box is cleared, stored with the profile — the same thing the
+ * connection dialog does — which is what lets the next launch reopen this server
+ * without asking. Cleared, it is used for this connection only and the profile is
+ * left exactly as it was.
  */
 function ConnectDialog({
   profile,
@@ -987,10 +1104,11 @@ function ConnectDialog({
 }: {
   profile: ConnectionProfile;
   busy: boolean;
-  onSubmit: (password: string) => void;
+  onSubmit: (password: string, rememberPassword: boolean) => void;
   onClose: () => void;
 }) {
   const [password, setPassword] = useState("");
+  const [remember, setRemember] = useState(true);
 
   return (
     <Dialog
@@ -1003,7 +1121,7 @@ function ConnectDialog({
           <Button variant="ghost" size="sm" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button size="sm" disabled={busy} onClick={() => onSubmit(password)}>
+          <Button size="sm" disabled={busy} onClick={() => onSubmit(password, remember)}>
             {busy ? "Connecting…" : "Connect"}
           </Button>
         </>
@@ -1018,11 +1136,21 @@ function ConnectDialog({
         value={password}
         onChange={(event) => setPassword(event.target.value)}
         onKeyDown={(event) => {
-          if (event.key === "Enter" && !busy) onSubmit(password);
+          if (event.key === "Enter" && !busy) onSubmit(password, remember);
         }}
       />
+      <div className="mt-3">
+        <Checkbox
+          id="connect-remember"
+          checked={remember}
+          onChange={(event) => setRemember(event.target.checked)}
+          label="Save with this connection"
+        />
+      </div>
       <p className="mt-2 text-[11px] text-muted-foreground">
-        Saved with the connection, so this server can be reopened on the next launch.
+        {remember
+          ? "Saved with the connection, so this server can be reopened on the next launch."
+          : "Used for this connection only — you will be asked for it again on the next launch."}
       </p>
     </Dialog>
   );

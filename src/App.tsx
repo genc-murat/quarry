@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 
 import { ConnectionList } from "@/components/connections/ConnectionList";
+import { ReconnectPrompt } from "@/components/connections/ReconnectPrompt";
 import { ExplorerPanel } from "@/components/explorer/ExplorerPanel";
 import { HistoryPanel } from "@/components/history/HistoryPanel";
 import { ObjectDialogHost } from "@/components/objects/ObjectDialogHost";
@@ -69,6 +70,7 @@ export default function App() {
 
       <StatusBar />
       <ObjectDialogHost />
+      <ReconnectPrompt />
       <Toaster />
     </div>
   );

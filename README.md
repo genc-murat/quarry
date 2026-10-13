@@ -390,17 +390,57 @@ the first one. Reopening is deliberately conservative, because it happens before
 anything: a connection is only reopened when it needs nothing from them, so either its password is
 already stored (`hasPassword`) or the driver's form has no password field at all (a file-backed
 SQLite profile). A server whose password was never saved is left for a manual connect rather than
-failing on every launch, a profile that has since been deleted is dropped, and a server the backend
-still had open is not connected twice. The result is summed up in a single toast (`Reconnected to 3
-servers`), and anything that did fail is reported in one line instead of one toast per server.
+failing on every launch, a profile that has since been deleted is dropped, a profile whose driver the
+registry does not know gets the same treatment (nothing can say what it needs, so it is never assumed
+to be passwordless), and a server the backend still had open is not connected twice. The result is
+summed up in a single toast (`Reconnected to 3 servers`), and anything that did fail is reported in
+one line instead of one toast per server.
 **Settings → General → Reconnect on launch** turns the whole behaviour off.
+
+The **New / Edit connection** dialog has two endings: **Save** and **Save & connect** write the profile
+to disk, while clearing **Save this connection** replaces them with a single **Connect** that opens
+the server exactly as the form stands and writes nothing. Such an ad-hoc session is never remembered
+— the remembered list carries profile ids, and there is no profile — so it stays out of the
+connection list and is not reopened on the next launch. Its password is used for that one connection.
+
+It is not a dead end either: right-clicking its root in the explorer offers **Save this
+connection…**, which opens the connection dialog filled with the driver and the host, port and user it
+was opened with — the values the session itself does not carry are kept when it is opened. A session
+that came from a profile offers **Edit connection…** instead, which opens the same dialog on the
+stored profile. Saving writes an ordinary profile **and points the live session at it**
+(`set_session_profile`): nothing is reconnected — only what the session stands for changes — so its
+root becomes a normal connection, it stops being offered for saving, and the next launch reopens it
+like any other saved connection. Editing a connection changes what the next connect will use; the
+open session keeps the connection it already has — so after an edit the app **offers** to reopen it
+("Reconnect with the new settings?", dismissible with **Later**). Accepting opens a fresh session for
+the same profile and closes the stale one only once the new connection is up, so a reconnect that
+fails leaves the working session in place; the profile stays remembered either way.
+
+The whole list can be carried to another machine: the **⋯** button in the connection sidebar's header
+offers **Export connections…** and **Import connections…**, both through the native file picker. The
+file is plain JSON (format marker `quarry.connections`, format version 1) holding every setting of every
+saved connection — engine, host, port, user, database, TLS mode and the driver's own extras. It holds
+**no passwords**: they live in this machine's encrypted vault and the export never reads it, so the
+other machine asks for each password once, on the first connect. An import keeps each connection's id,
+so the profile that arrives *is* that profile rather than a look-alike; a connection whose id is
+already in the list is left exactly as it is and reported instead of being duplicated — importing the
+same file twice is a no-op rather than a second copy of every connection, and cannot silently undo what
+was changed here since. An entry whose driver this build does not have is named in the report and not
+stored, and a file that is not a Quarry connections file is refused by name instead of being read as
+"no connections to import". Nothing is connected by an import: the settings land in the list and the
+next connect is the ordinary one.
 
 A connection that was **not** reopened is not hidden either: it stays in the explorer as a dimmed
 root marked `was open`, so the server you had is still one click away. Clicking it reconnects —
-asking for the password only when the profile has none stored, and storing what you type with the
-connection exactly as the connection dialog does, which is what makes the next launch reopen it
-silently. Right-clicking a dimmed root offers **Connect** and **Forget**, and forgetting is
-persistent: that profile is no longer offered or reopened (`connections.open` in `settings.json`).
+asking for the password only when the profile has none stored, and trying what you type as part of
+that connect; it is stored with the connection exactly as the connection dialog does only once the
+connection has worked, so a typo is rejected instead of being written down and retried on every
+launch from then on. Clearing the prompt's **Save with this connection** box uses the password for
+that one connection and leaves the profile untouched — the next launch asks again. Right-clicking a
+dimmed root offers **Connect** and **Forget**, and forgetting is persistent: that profile is no longer
+offered or reopened (`connections.open` in `settings.json`).
+With **Settings → General → Reconnect on launch** off, a dimmed root is not drawn at all: the
+remembered list is not read on the way in, so nothing about the last session is offered.
 
 ## Query workbench
 
@@ -458,9 +498,12 @@ group.
 - The database list refreshes automatically: when the window comes to the front (focus) and after a
   query that runs `CREATE/DROP DATABASE|SCHEMA`; this way a database opened by another client is
   visible without pressing **Refresh** (`src/lib/sqlIntent.ts`).
-- When the window comes to the front (focus/visibility) the contents of **expanded** nodes are also
-  re-read: tables, views etc. under a database/schema appear in the tree without manually pressing
-  **Refresh** if they were created outside.
+- The focus refresh is scoped to the **active** connection — only its database list and the contents
+  of **its** expanded nodes are re-read (tables, views etc. under a database/schema appear without
+  manually pressing **Refresh** if they were created outside). Refreshing every open connection on
+  each focus would mean one database read per open server (plus every expanded tree) each time the
+  window came forward; another connection is re-read from its own root's **Refresh**, or from the
+  toolbar's **Refresh all connections**.
 - Tree state (expanded databases, loaded objects and group collapse state) is preserved while
   navigating; the tree does not collapse when you switch to another sidebar tab and back
   (`src/lib/explorerTree.ts`). When a connection is closed the cache for that session is cleared, so
@@ -787,8 +830,9 @@ certificate to that workflow's `env` is all the packaging side needs.
 - The new-table wizard v1 covers columns only; indexes and foreign keys are added after creation with
   the existing dialogs. The live SQL preview is a TS copy of the Rust generation (a project
   convention).
-- In the browser mock `create_table` and settings are simulated in memory only; real persistence and
-  schema changes require the desktop backend.
+- In the browser mock `create_table`, settings and the connection export/import are simulated in
+  memory only; real persistence, schema changes and the transfer file require the desktop backend
+  (the mock answers an import the way the same machine would: everything in the file is already here).
 - The browser mock formats the editor result per engine: Redis commands through the `reply_to_table`
   mapping (scalar → single cell, flat array → one row per element, nested array → `col_1`/`col_2`,
   map → `field`/`value`), and MongoDB `find`/`aggregate` sample documents through the
@@ -822,6 +866,9 @@ certificate to that workflow's `env` is all the packaging side needs.
 - Releases are unsigned at the OS level: see the note in [Updates and releases](#updates-and-releases)
   about Apple notarization and Windows SmartScreen, and the releases are drafts until they are
   published by hand.
+- The connection transfer file is written and read by the backend, so its shape is tested there
+  (`src-tauri/src/transfer.rs`) and the UI half through scripted commands; an import against a second
+  machine with a real config directory has not been exercised end to end.
 - ERD visualization is still on the roadmap.
 - The completion tree is fed at most 400 tables; on very large schemas the remaining tables are
   skipped (the editor stays responsive).

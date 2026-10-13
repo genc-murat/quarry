@@ -1,9 +1,25 @@
 import { useState } from "react";
-import { FilePlus, Loader2, Pencil, Plug, Plus, ShieldCheck, Terminal, Trash2 } from "lucide-react";
+import {
+  Download,
+  FilePlus,
+  Loader2,
+  MoreHorizontal,
+  Pencil,
+  Plug,
+  Plus,
+  ShieldCheck,
+  Terminal,
+  Trash2,
+  Upload,
+} from "lucide-react";
 
-import { ConnectionDialog } from "@/components/connections/ConnectionDialog";
+import {
+  ConnectionDialog,
+  type ConnectionDialogMode,
+} from "@/components/connections/ConnectionDialog";
 import { Button } from "@/components/ui/button";
 import { ContextMenu, type MenuEntry } from "@/components/ui/context-menu";
+import { pickConnectionExportPath, pickConnectionImportPath } from "@/lib/connectionFiles";
 import { cn } from "@/lib/utils";
 import type { ConnectionProfile } from "@/lib/types";
 import { useWorkspace } from "@/stores/workspace";
@@ -20,10 +36,50 @@ export function ConnectionList() {
   const newScript = useWorkspace((s) => s.newScript);
   const openConsole = useWorkspace((s) => s.openConsole);
 
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [editing, setEditing] = useState<ConnectionProfile | null>(null);
+  const offerReconnect = useWorkspace((s) => s.offerReconnect);
+  // One nullable value, not an `open` flag beside an `editing` profile: the
+  // dialog is open exactly when there is a request to give it.
+  const [dialog, setDialog] = useState<ConnectionDialogMode | null>(null);
   const [connecting, setConnecting] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; profile: ConnectionProfile } | null>(null);
+  // The list-wide menu (export/import), anchored under the button that opened it.
+  const [listMenu, setListMenu] = useState<{ x: number; y: number } | null>(null);
+
+  const exportConnectionsTo = useWorkspace((s) => s.exportConnectionsTo);
+  const importConnectionsFrom = useWorkspace((s) => s.importConnectionsFrom);
+
+  /**
+   * Carry every saved connection to a file. Reported from the store, so both
+   * this menu and any later caller say the same thing about what happened.
+   */
+  async function exportAllConnections() {
+    const path = await pickConnectionExportPath();
+    if (path) await exportConnectionsTo(path);
+  }
+
+  async function importConnections() {
+    const path = await pickConnectionImportPath();
+    if (path) await importConnectionsFrom(path);
+  }
+
+  const listMenuEntries = (): MenuEntry[] => [
+    { type: "label", label: "Move to another machine" },
+    {
+      label: "Export connections…",
+      icon: <Download className="h-3.5 w-3.5" />,
+      disabled: profiles.length === 0,
+      hint: profiles.length === 0 ? "none saved" : `${profiles.length}`,
+      onSelect: () => void exportAllConnections(),
+    },
+    {
+      label: "Import connections…",
+      icon: <Upload className="h-3.5 w-3.5" />,
+      onSelect: () => void importConnections(),
+    },
+    // Said here rather than in a hint, because it is the one thing that is not
+    // obvious about the file: it carries settings, never secrets.
+    { type: "label", label: "Passwords stay on this machine" },
+  ];
 
   const accentFor = (driverId: string) =>
     drivers.find((d) => d.id === driverId)?.accentColor ?? "var(--primary)";
@@ -75,17 +131,27 @@ export function ConnectionList() {
         <h2 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           Connections
         </h2>
-        <Button
-          size="icon-sm"
-          variant="ghost"
-          title="New connection"
-          onClick={() => {
-            setEditing(null);
-            setDialogOpen(true);
-          }}
-        >
-          <Plus className="h-3.5 w-3.5" />
-        </Button>
+        <div className="flex items-center gap-0.5">
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            title="Export or import connections"
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              setListMenu({ x: rect.left, y: rect.bottom + 4 });
+            }}
+          >
+            <MoreHorizontal className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            size="icon-sm"
+            variant="ghost"
+            title="New connection"
+            onClick={() => setDialog({ mode: "create" })}
+          >
+            <Plus className="h-3.5 w-3.5" />
+          </Button>
+        </div>
       </header>
 
       <div className="flex-1 space-y-2 overflow-y-auto px-2 pb-3">
@@ -98,10 +164,7 @@ export function ConnectionList() {
             <Button
               size="sm"
               className="mt-3"
-              onClick={() => {
-                setEditing(null);
-                setDialogOpen(true);
-              }}
+              onClick={() => setDialog({ mode: "create" })}
             >
               <Plus className="h-3.5 w-3.5" />
               New connection
@@ -186,10 +249,7 @@ export function ConnectionList() {
                   size="icon-sm"
                   variant="ghost"
                   title="Edit"
-                  onClick={() => {
-                    setEditing(profile);
-                    setDialogOpen(true);
-                  }}
+                  onClick={() => setDialog({ mode: "edit", editing: profile })}
                 >
                   <Pencil className="h-3.5 w-3.5" />
                 </Button>
@@ -217,14 +277,26 @@ export function ConnectionList() {
         />
       ) : null}
 
-      <ConnectionDialog
-        open={dialogOpen}
-        editing={editing}
-        onClose={() => {
-          setDialogOpen(false);
-          setEditing(null);
-        }}
-      />
+      {listMenu ? (
+        <ContextMenu
+          entries={listMenuEntries()}
+          x={listMenu.x}
+          y={listMenu.y}
+          onClose={() => setListMenu(null)}
+        />
+      ) : null}
+
+      {dialog ? (
+        <ConnectionDialog
+          open
+          {...dialog}
+          // Editing a connection that is open leaves its session on the old
+          // settings, so the app offers to reopen it; a new connection has no
+          // session to offer for, and the store ignores that case.
+          onSaved={(profile) => offerReconnect(profile.id)}
+          onClose={() => setDialog(null)}
+        />
+      ) : null}
     </div>
   );
 }

@@ -174,7 +174,13 @@ fn resolve_open_request(
             host: profile.host.clone(),
             port: profile.port,
             username: profile.username.clone(),
-            password: state.secrets.get_password(&profile.id),
+            // A password supplied with the request is tried as a one-off: a typo
+            // must not reach the vault, so the caller stores it only after this
+            // connect has succeeded.
+            password: input
+                .password
+                .clone()
+                .or_else(|| state.secrets.get_password(&profile.id)),
             database: profile.database.clone(),
             ssl_mode: profile.ssl_mode,
             options: profile.options.clone(),
@@ -193,6 +199,21 @@ fn resolve_open_request(
 #[tauri::command]
 pub async fn disconnect(state: State<'_, AppState>, connection_id: String) -> CmdResult<()> {
     state.sessions.remove(&connection_id).await;
+    Ok(())
+}
+
+/// Record that an open, ad-hoc session is now the given saved profile. Nothing
+/// is reconnected: the session keeps its live connection and only the profile it
+/// stands for changes, so a later `list_sessions` reports it as saved.
+#[tauri::command]
+pub async fn set_session_profile(
+    state: State<'_, AppState>,
+    connection_id: String,
+    profile_id: String,
+) -> CmdResult<()> {
+    if !state.sessions.set_profile(&connection_id, &profile_id).await {
+        return Err(DriverError::NotFound(format!("session {connection_id}")).to_string());
+    }
     Ok(())
 }
 

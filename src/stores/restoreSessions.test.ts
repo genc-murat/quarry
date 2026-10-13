@@ -308,14 +308,105 @@ test("a password typed in the explorer is stored with the profile", async (t) =>
 
   const session = await useWorkspace.getState().connectProfile("p3", "hunter2");
 
-  // Saved first (so the next launch can reopen it), then connected.
+  // The password goes out with the connect; it is written to the profile only
+  // after that connect has worked, so a typo cannot be stored and retried.
+  assert.deepEqual(backend.argsFor("connect"), [
+    { input: { profileId: "p3", password: "hunter2" } },
+  ]);
   const saved = backend.argsFor("save_connection")[0]?.input as Record<string, unknown>;
   assert.equal(saved.password, "hunter2");
   assert.equal(saved.id, "p3");
-  assert.deepEqual(backend.argsFor("connect"), [{ input: { profileId: "p3" } }]);
   assert.equal(session?.id, "s-p3");
   assert.deepEqual(useWorkspace.getState().rememberedProfileIds, ["p3"]);
   assert.deepEqual(lastPersisted(backend)?.connections?.open, ["p3"]);
+});
+
+test("a password the user chose not to save is used for that connection only", async (t) => {
+  const backend = installTestBackend(replies([]));
+  cleanup(t, backend);
+  fakeWindow();
+  useWorkspace.setState({
+    drivers: [mysqlDriver, sqliteDriver],
+    profiles: [passwordlessProfile, sqliteProfile],
+    sessions: [],
+    activeSessionId: null,
+    rememberedProfileIds: [],
+    settings: mergeSettings(undefined),
+  });
+
+  const session = await useWorkspace.getState().connectProfile("p3", "hunter2", false);
+
+  // Connected with it, but the profile is untouched: the connection is
+  // remembered as open, the password is not remembered at all.
+  assert.deepEqual(backend.argsFor("connect"), [
+    { input: { profileId: "p3", password: "hunter2" } },
+  ]);
+  assert.deepEqual(backend.argsFor("save_connection"), []);
+  assert.equal(session?.id, "s-p3");
+  assert.equal(
+    useWorkspace.getState().profiles.find((profile) => profile.id === "p3")?.hasPassword,
+    false,
+  );
+  assert.deepEqual(useWorkspace.getState().rememberedProfileIds, ["p3"]);
+});
+
+test("a password the server rejects is not written into the profile", async (t) => {
+  const backend = installTestBackend({
+    ...replies([]),
+    connect: () => {
+      throw new Error("access denied");
+    },
+  });
+  cleanup(t, backend);
+  fakeWindow();
+  useWorkspace.setState({
+    drivers: [mysqlDriver, sqliteDriver],
+    profiles: [passwordlessProfile, sqliteProfile],
+    sessions: [],
+    activeSessionId: null,
+    rememberedProfileIds: [],
+    settings: mergeSettings(undefined),
+  });
+
+  const session = await useWorkspace.getState().connectProfile("p3", "typo");
+
+  assert.equal(session, null);
+  // Nothing was stored and nothing is remembered: the profile is exactly as it
+  // was, so the next attempt starts from the same place this one did.
+  assert.deepEqual(backend.argsFor("save_connection"), []);
+  assert.deepEqual(useWorkspace.getState().rememberedProfileIds, []);
+  assert.equal(useWorkspace.getState().toasts.at(-1)?.title, "Connection failed");
+});
+
+test("a remembered profile with an unknown driver is left for a manual connect", async (t) => {
+  // `redis` is not in the registry, so nothing here can say whether it needs a
+  // password — it must not be assumed passwordless and attempted on every launch.
+  const redisProfile: ConnectionProfile = {
+    id: "p4",
+    name: "Cache",
+    driver: "redis",
+    host: "127.0.0.1",
+    port: 6379,
+    username: "",
+    database: null,
+    sslMode: "disabled",
+    options: {},
+    hasPassword: true,
+  };
+  const backend = installTestBackend({
+    ...replies(["p4", "p2"]),
+    list_connections: () => [mysqlProfile, passwordlessProfile, sqliteProfile, redisProfile],
+  });
+  cleanup(t, backend);
+  fakeWindow();
+
+  await useWorkspace.getState().bootstrap();
+
+  assert.deepEqual(backend.argsFor("connect"), [{ input: { profileId: "p2" } }]);
+  assert.deepEqual(
+    useWorkspace.getState().sessions.map((session) => session.id),
+    ["s-p2"],
+  );
 });
 
 test("forgetting a connection clears it from the saved list", async (t) => {
@@ -375,6 +466,221 @@ test("a session opened without a profile is not remembered", async (t) => {
   // Nothing to reopen next launch: there is no profile behind this session.
   assert.deepEqual(useWorkspace.getState().rememberedProfileIds, []);
   assert.deepEqual(lastPersisted(backend)?.connections?.open, []);
+});
+
+test("a session with no profile keeps what it could be saved with", async (t) => {
+  const backend = installTestBackend({
+    ...replies([]),
+    connect: () => ({
+      session: {
+        id: "s-raw",
+        profileId: "",
+        driver: "mysql",
+        name: "reader@10.0.0.9",
+        server: { supportsTls: false },
+      } satisfies SessionInfo,
+    }),
+  });
+  cleanup(t, backend);
+  fakeWindow();
+  useWorkspace.setState({
+    drivers: [mysqlDriver, sqliteDriver],
+    profiles: [mysqlProfile, sqliteProfile],
+    sessions: [],
+    activeSessionId: null,
+    rememberedProfileIds: [],
+    adhocConfigs: {},
+    settings: mergeSettings(undefined),
+  });
+
+  const config = {
+    driver: "mysql",
+    host: "10.0.0.9",
+    port: 3307,
+    username: "reader",
+    sslMode: "preferred" as const,
+    options: {},
+  };
+  await useWorkspace.getState().connect({ config });
+
+  // Kept per session, so the explorer can offer to save it as a connection.
+  assert.deepEqual(useWorkspace.getState().adhocConfigs["s-raw"], config);
+
+  await useWorkspace.getState().disconnect("s-raw");
+
+  assert.deepEqual(useWorkspace.getState().adhocConfigs, {});
+});
+
+/** A workspace with one open session that was opened from a config. */
+function withAdhocSession() {
+  useWorkspace.setState({
+    drivers: [mysqlDriver, sqliteDriver],
+    profiles: [mysqlProfile, sqliteProfile],
+    sessions: [
+      {
+        id: "s-raw",
+        profileId: "",
+        driver: "mysql",
+        name: "reader@10.0.0.9",
+        server: { supportsTls: false },
+      } satisfies SessionInfo,
+    ],
+    activeSessionId: "s-raw",
+    rememberedProfileIds: [],
+    adhocConfigs: {
+      "s-raw": {
+        driver: "mysql",
+        host: "10.0.0.9",
+        port: 3307,
+        username: "reader",
+        sslMode: "preferred",
+        options: {},
+      },
+    },
+    settings: mergeSettings(undefined),
+  });
+}
+
+test("saving a session as a connection points that session at it", async (t) => {
+  const backend = installTestBackend({ ...replies([]), set_session_profile: () => undefined });
+  cleanup(t, backend);
+  fakeWindow();
+  withAdhocSession();
+
+  await useWorkspace.getState().bindSessionToProfile("s-raw", "p-new");
+
+  // Recorded on both sides: the backend keeps it across a reload, the store so
+  // the explorer and the remembered list follow immediately.
+  assert.deepEqual(backend.argsFor("set_session_profile"), [
+    { connectionId: "s-raw", profileId: "p-new" },
+  ]);
+  assert.equal(useWorkspace.getState().sessions[0]?.profileId, "p-new");
+  assert.deepEqual(useWorkspace.getState().rememberedProfileIds, ["p-new"]);
+  assert.deepEqual(useWorkspace.getState().adhocConfigs, {});
+  assert.deepEqual(lastPersisted(backend)?.connections?.open, ["p-new"]);
+});
+
+test("a backend that cannot record it still leaves the session saved", async (t) => {
+  const backend = installTestBackend({
+    ...replies([]),
+    set_session_profile: () => {
+      throw new Error("no such session");
+    },
+  });
+  cleanup(t, backend);
+  fakeWindow();
+  withAdhocSession();
+
+  await useWorkspace.getState().bindSessionToProfile("s-raw", "p-new");
+
+  // What the backend failed to remember only costs a later reload, so the
+  // session still becomes the saved connection here — and the user is told.
+  assert.equal(useWorkspace.getState().sessions[0]?.profileId, "p-new");
+  assert.deepEqual(useWorkspace.getState().rememberedProfileIds, ["p-new"]);
+  assert.equal(
+    useWorkspace.getState().toasts.at(-1)?.title,
+    "Could not record the saved connection",
+  );
+});
+
+test("binding a session that is no longer open does nothing", async (t) => {
+  const backend = installTestBackend({ ...replies([]), set_session_profile: () => undefined });
+  cleanup(t, backend);
+  fakeWindow();
+  withAdhocSession();
+  useWorkspace.setState({ sessions: [] });
+
+  await useWorkspace.getState().bindSessionToProfile("s-raw", "p-new");
+
+  assert.deepEqual(backend.argsFor("set_session_profile"), []);
+  assert.deepEqual(useWorkspace.getState().rememberedProfileIds, []);
+});
+
+/** A workspace with the MySQL profile open, as a session in the store. */
+function withOpenConnection() {
+  useWorkspace.setState({
+    drivers: [mysqlDriver, sqliteDriver],
+    profiles: [mysqlProfile, sqliteProfile],
+    sessions: [sessionOf("p1")],
+    activeSessionId: "s-p1",
+    rememberedProfileIds: ["p1"],
+    settings: mergeSettings(undefined),
+  });
+}
+
+test("editing an open connection offers to reconnect the session using it", async (t) => {
+  // A backend hands out a new session id for every connect, as the real one does.
+  const backend = installTestBackend({
+    ...replies([]),
+    connect: () => ({ session: { ...sessionOf("p1"), id: "s-fresh" } }),
+  });
+  cleanup(t, backend);
+  fakeWindow();
+  withOpenConnection();
+
+  useWorkspace.getState().offerReconnect("p1");
+  assert.deepEqual(useWorkspace.getState().reconnectOffer, {
+    sessionId: "s-p1",
+    name: "Local MySQL 5.6",
+  });
+
+  assert.equal(await useWorkspace.getState().reconnectSession(), true);
+
+  // A fresh session for the same profile, and the stale one is gone.
+  assert.deepEqual(backend.argsFor("connect"), [{ input: { profileId: "p1" } }]);
+  assert.deepEqual(backend.argsFor("disconnect"), [{ connectionId: "s-p1" }]);
+  assert.deepEqual(
+    useWorkspace.getState().sessions.map((session) => session.id),
+    ["s-fresh"],
+  );
+  assert.equal(useWorkspace.getState().activeSessionId, "s-fresh");
+  // The new session stands for the profile, so it is still reopened next launch.
+  assert.deepEqual(useWorkspace.getState().rememberedProfileIds, ["p1"]);
+  assert.deepEqual(lastPersisted(backend)?.connections?.open, ["p1"]);
+  assert.equal(useWorkspace.getState().reconnectOffer, null);
+});
+
+test("a reconnect that fails leaves the working session alone", async (t) => {
+  const backend = installTestBackend({
+    ...replies([]),
+    connect: () => {
+      throw new Error("access denied");
+    },
+  });
+  cleanup(t, backend);
+  fakeWindow();
+  withOpenConnection();
+
+  useWorkspace.getState().offerReconnect("p1");
+
+  assert.equal(await useWorkspace.getState().reconnectSession(), false);
+  // The old session was never closed, so the user is not left with nothing.
+  assert.deepEqual(backend.argsFor("disconnect"), []);
+  assert.deepEqual(
+    useWorkspace.getState().sessions.map((session) => session.id),
+    ["s-p1"],
+  );
+  assert.deepEqual(useWorkspace.getState().rememberedProfileIds, ["p1"]);
+});
+
+test("nothing is offered for a connection that is not open", async (t) => {
+  const backend = installTestBackend(replies([]));
+  cleanup(t, backend);
+  fakeWindow();
+  useWorkspace.setState({
+    drivers: [mysqlDriver, sqliteDriver],
+    profiles: [mysqlProfile, sqliteProfile],
+    sessions: [],
+    activeSessionId: null,
+    rememberedProfileIds: [],
+    settings: mergeSettings(undefined),
+  });
+
+  useWorkspace.getState().offerReconnect("p1");
+
+  assert.equal(useWorkspace.getState().reconnectOffer, null);
+  assert.equal(await useWorkspace.getState().reconnectSession(), false);
+  assert.deepEqual(backend.argsFor("connect"), []);
 });
 
 test("a failed restore is reported once, without the successful ones", async (t) => {

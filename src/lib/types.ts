@@ -433,8 +433,24 @@ export interface SaveConnectionInput {
   password?: string | null;
 }
 
+/**
+ * What an import of a connection transfer file did. Mirrors `ImportSummary` in
+ * `src-tauri/src/transfer.rs`: the connections added here, the ones whose id was
+ * already stored and left alone, and the entries this build has no driver for.
+ */
+export interface ImportConnectionsSummary {
+  imported: number;
+  skipped: number;
+  unsupported: string[];
+}
+
 export interface OpenSessionRequest {
   profileId?: string | null;
+  /**
+   * A password typed at connect time. It is tried for this connection only and
+   * is not stored by the backend; save it with the profile once it works.
+   */
+  password?: string | null;
   config?: {
     driver: string;
     host: string;

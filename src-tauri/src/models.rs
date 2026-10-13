@@ -381,6 +381,11 @@ pub struct OpenSessionRequest {
     /// Connect an already saved profile...
     #[serde(default)]
     pub profile_id: Option<String>,
+    /// ...with a password typed just now. It overrides the stored one for this
+    /// connection only and is never persisted: the caller stores it separately
+    /// once the connection has actually worked.
+    #[serde(default)]
+    pub password: Option<String>,
     /// ...or a fully specified, ad-hoc connection.
     #[serde(default)]
     pub config: Option<ConnectionConfig>,

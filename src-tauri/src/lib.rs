@@ -14,6 +14,7 @@ mod secrets;
 mod session;
 mod sql_split;
 mod store;
+mod transfer;
 // Test-only: it pins the release check's signature fixture against the verifier
 // the updater plugin calls, so the check and the app cannot drift apart.
 #[cfg(test)]
@@ -82,9 +83,12 @@ pub fn run() {
             commands::list_connections,
             commands::save_connection,
             commands::delete_connection,
+            transfer::export_connections,
+            transfer::import_connections,
             commands::test_connection,
             commands::connect,
             commands::disconnect,
+            commands::set_session_profile,
             commands::list_sessions,
             commands::list_databases,
             commands::list_namespaces,

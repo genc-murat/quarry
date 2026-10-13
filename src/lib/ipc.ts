@@ -8,6 +8,7 @@ import type {
   DatabaseInfo,
   DatabaseObject,
   DriverDescriptor,
+  ImportConnectionsSummary,
   InspectorSection,
   NamespaceInfo,
   ObjectActionRequest,
@@ -72,11 +73,23 @@ export const ipc = {
   saveConnection: (input: SaveConnectionInput) =>
     call<ConnectionProfile>("save_connection", { input }),
   deleteConnection: (id: string) => call<void>("delete_connection", { id }),
+  /**
+   * Write every saved connection to `path` as a transfer file and return how
+   * many were written. Passwords are not in it — the backend never reads the
+   * vault for a transfer — so the other machine asks for each one once.
+   */
+  exportConnections: (path: string) => call<number>("export_connections", { path }),
+  /** Read a transfer file back, adding the connections this machine lacks. */
+  importConnections: (path: string) =>
+    call<ImportConnectionsSummary>("import_connections", { path }),
   testConnection: (config: OpenSessionRequest["config"]) =>
     call<ServerInfo>("test_connection", { config }),
 
   connect: (input: OpenSessionRequest) => call<ConnectResult>("connect", { input }),
   disconnect: (connectionId: string) => call<void>("disconnect", { connectionId }),
+  /** Record that an open session is now a saved profile, without reconnecting. */
+  setSessionProfile: (connectionId: string, profileId: string) =>
+    call<void>("set_session_profile", { connectionId, profileId }),
   listSessions: () => call<SessionInfo[]>("list_sessions"),
 
   listDatabases: (connectionId: string) => call<DatabaseInfo[]>("list_databases", { connectionId }),

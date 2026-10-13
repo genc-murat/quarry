@@ -2,17 +2,40 @@ import { useEffect, useMemo, useState } from "react";
 import { Plug, Zap } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Dialog } from "@/components/ui/dialog";
 import { Input, Label, Select } from "@/components/ui/input";
 import { errorMessage, ipc } from "@/lib/ipc";
 import type { ConnectionProfile, DriverDescriptor, SslMode } from "@/lib/types";
 import { useWorkspace } from "@/stores/workspace";
 
-interface Props {
+/**
+ * How the dialog was opened. A discriminated union rather than a pair of
+ * optional props, so "edit this profile" and "start from these values" cannot
+ * be passed at once: `editing` only exists on the edit arm and `prefill` only
+ * on the create arm, and each is required on the arm that has it.
+ */
+export type ConnectionDialogMode =
+  | {
+      mode: "create";
+      /**
+       * Starting values for a **new** connection — what a session being saved as
+       * a connection was opened with.
+       */
+      prefill?: Partial<ConnectionProfile> | null;
+    }
+  | {
+      mode: "edit";
+      /** The stored profile the form rewrites in place. */
+      editing: ConnectionProfile;
+    };
+
+type Props = {
   open: boolean;
   onClose: () => void;
-  editing?: ConnectionProfile | null;
-}
+  /** Called with the profile that was just written, before the dialog closes. */
+  onSaved?: (profile: ConnectionProfile) => void;
+} & ConnectionDialogMode;
 
 function defaultsFor(driver?: DriverDescriptor): Record<string, unknown> {
   const values: Record<string, unknown> = {};
@@ -24,9 +47,19 @@ function defaultsFor(driver?: DriverDescriptor): Record<string, unknown> {
   return values;
 }
 
-/** The connection form is generated entirely from `driver.configFields`, so a
- *  new engine needs zero UI changes. */
-export function ConnectionDialog({ open, onClose, editing }: Props) {
+/**
+ * The connection form is generated entirely from `driver.configFields`, so a new
+ * engine needs zero UI changes. It can also open a server without writing a
+ * profile at all (the **Save this connection** box): useful for a one-off look
+ * at a server, and the reason the ad-hoc `connect` path exists on the backend.
+ */
+export function ConnectionDialog(props: Props) {
+  const { open, onClose, onSaved } = props;
+  // The form works with just two values: the profile being edited (null while
+  // creating) and the values a new connection starts from. The mode only decides
+  // which of them exists, so it is narrowed once here instead of at every use.
+  const editing = props.mode === "edit" ? props.editing : null;
+  const prefill = props.mode === "create" ? props.prefill ?? null : null;
   const drivers = useWorkspace((s) => s.drivers);
   const saveConnection = useWorkspace((s) => s.saveConnection);
   const connect = useWorkspace((s) => s.connect);
@@ -37,6 +70,8 @@ export function ConnectionDialog({ open, onClose, editing }: Props) {
   const [values, setValues] = useState<Record<string, unknown>>({});
   const [password, setPassword] = useState("");
   const [clearPassword, setClearPassword] = useState(false);
+  // Whether this connection should exist after the dialog closes at all.
+  const [saveProfile, setSaveProfile] = useState(true);
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
 
@@ -59,14 +94,29 @@ export function ConnectionDialog({ open, onClose, editing }: Props) {
       setPassword("");
       setClearPassword(false);
     } else {
-      const first = drivers[0];
-      setDriverId(first?.id ?? "");
-      setName("");
-      setValues(defaultsFor(first));
+      // A new connection starts from the driver's own defaults, or from what a
+      // session being saved as a connection was opened with.
+      const start = (prefill?.driver && drivers.find((d) => d.id === prefill.driver)) || drivers[0];
+      setDriverId(start?.id ?? "");
+      setName(prefill?.name ?? "");
+      setValues({
+        ...defaultsFor(start),
+        ...(prefill
+          ? {
+              host: prefill.host ?? "",
+              port: prefill.port ?? start?.defaultPort ?? 0,
+              username: prefill.username ?? "",
+              database: prefill.database ?? "",
+              sslMode: prefill.sslMode ?? "preferred",
+              ...(prefill.options ?? {}),
+            }
+          : {}),
+      });
       setPassword("");
       setClearPassword(false);
     }
-  }, [open, editing, drivers]);
+    setSaveProfile(true);
+  }, [open, editing, prefill, drivers]);
 
   function changeDriver(nextId: string) {
     const next = drivers.find((d) => d.id === nextId);
@@ -114,6 +164,26 @@ export function ConnectionDialog({ open, onClose, editing }: Props) {
     }
   }
 
+  /**
+   * Open the server as it stands on the form without writing anything. The
+   * session is ad-hoc — the backend is given a config rather than a profile id —
+   * so it is not remembered for the next launch and the password is used for
+   * this connection only.
+   */
+  async function handleQuickConnect() {
+    if (!driver) return;
+    setSaving(true);
+    const payload = buildPayload();
+    const session = await connect(
+      { config: { driver: driver.id, password: password || null, ...payload } },
+      // Nothing else would carry the display name: an ad-hoc session is named
+      // `user@host` by the backend.
+      name.trim() || undefined,
+    );
+    setSaving(false);
+    if (session) onClose();
+  }
+
   async function handleSave(alsoConnect: boolean) {
     if (!driver) return;
     setSaving(true);
@@ -133,6 +203,7 @@ export function ConnectionDialog({ open, onClose, editing }: Props) {
     });
     setSaving(false);
     if (!profile) return;
+    onSaved?.(profile);
     onClose();
     if (alsoConnect) {
       await connect({ profileId: profile.id });
@@ -159,13 +230,22 @@ export function ConnectionDialog({ open, onClose, editing }: Props) {
             <Zap className="h-3.5 w-3.5" />
             {testing ? "Testing…" : "Test"}
           </Button>
-          <Button size="sm" onClick={() => handleSave(false)} disabled={saving || !driver}>
-            Save
-          </Button>
-          <Button size="sm" onClick={() => handleSave(true)} disabled={saving || !driver}>
-            <Plug className="h-3.5 w-3.5" />
-            Save & connect
-          </Button>
+          {saveProfile ? (
+            <>
+              <Button size="sm" onClick={() => handleSave(false)} disabled={saving || !driver}>
+                Save
+              </Button>
+              <Button size="sm" onClick={() => handleSave(true)} disabled={saving || !driver}>
+                <Plug className="h-3.5 w-3.5" />
+                Save & connect
+              </Button>
+            </>
+          ) : (
+            <Button size="sm" onClick={handleQuickConnect} disabled={saving || !driver}>
+              <Plug className="h-3.5 w-3.5" />
+              {saving ? "Connecting…" : "Connect"}
+            </Button>
+          )}
         </>
       }
     >
@@ -268,6 +348,20 @@ export function ConnectionDialog({ open, onClose, editing }: Props) {
             ) : null}
           </div>
         ))}
+
+        <div className="col-span-2 mt-1 border-t border-border/60 pt-3">
+          <Checkbox
+            id="conn-save"
+            checked={saveProfile}
+            onChange={(event) => setSaveProfile(event.target.checked)}
+            label="Save this connection"
+          />
+          <p className="mt-2 text-[11px] text-muted-foreground">
+            {saveProfile
+              ? "Stored locally, so it appears in the connection list and can be reopened on the next launch."
+              : "Used for this session only — nothing is written, so it will not appear in the connection list."}
+          </p>
+        </div>
       </div>
     </Dialog>
   );

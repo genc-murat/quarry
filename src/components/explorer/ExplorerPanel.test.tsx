@@ -5,6 +5,7 @@ import { act } from "react";
 
 import { ExplorerPanel } from "./ExplorerPanel.tsx";
 import { resetExplorerTree } from "@/lib/explorerTree.ts";
+import { mergeSettings } from "@/lib/settings.ts";
 import { installTestBackend, type TestBackend } from "@/lib/testBackend.ts";
 import { click, closeDom, mount, type MountedComponent } from "@/lib/testRender.tsx";
 import type {
@@ -124,6 +125,34 @@ const passwordlessProfile: ConnectionProfile = {
   port: 3306,
   username: "reader",
   database: null,
+  sslMode: "preferred",
+  options: {},
+  hasPassword: false,
+};
+
+/** A session opened from a config rather than a profile: nothing to reopen. */
+const adhocSession: SessionInfo = {
+  id: "s3",
+  profileId: "",
+  driver: "mysql",
+  name: "reader@10.0.0.9",
+  server: {
+    version: "5.6.51-log",
+    currentUser: "reader",
+    currentDatabase: "shop",
+    supportsTls: false,
+  },
+};
+
+/** The profile the dialog writes when the ad-hoc session above is saved. */
+const savedAdhocProfile: ConnectionProfile = {
+  id: "p-new",
+  name: "reader@10.0.0.9",
+  driver: "mysql",
+  host: "10.0.0.9",
+  port: 3307,
+  username: "reader",
+  database: "shop",
   sslMode: "preferred",
   options: {},
   hasPassword: false,
@@ -370,6 +399,96 @@ test("the toolbar refresh re-reads every connection", async (t) => {
   ]);
 });
 
+test("a session with no profile behind it can be saved as a connection", async (t) => {
+  const backend = installTestBackend({
+    ...replies(),
+    save_connection: () => savedAdhocProfile,
+    list_connections: () => [
+      mysqlProfile,
+      postgresProfile,
+      passwordlessProfile,
+      savedAdhocProfile,
+    ],
+    set_session_profile: () => undefined,
+  });
+  cleanup(t, backend);
+  useWorkspace.setState({
+    drivers: [mysqlDriver, postgresDriver, sqliteDriver],
+    profiles: [mysqlProfile, postgresProfile, passwordlessProfile],
+    sessions: [adhocSession],
+    activeSessionId: "s3",
+    databasesBySession: {},
+    rememberedProfileIds: [],
+    // What the session was opened with; the connection dialog starts from it.
+    adhocConfigs: {
+      s3: {
+        driver: "mysql",
+        host: "10.0.0.9",
+        port: 3307,
+        username: "reader",
+        sslMode: "preferred",
+        options: {},
+      },
+    },
+  });
+  const view = await mounted();
+  t.after(view.unmount);
+
+  const root = roots(view).find((candidate) =>
+    candidate.textContent?.includes("reader@10.0.0.9"),
+  );
+  assert.ok(root, "no root for the ad-hoc session");
+  await act(async () => {
+    root.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: 40 }));
+  });
+
+  assert.match(view.text(), /Save this connection/);
+  await click(view, "Save this connection…");
+
+  // A new connection, prefilled with the host and port the session used — values
+  // the session itself does not carry.
+  assert.match(view.text(), /New connection/);
+  const host = view.container.querySelector("#field-host") as HTMLInputElement | null;
+  const port = view.container.querySelector("#field-port") as HTMLInputElement | null;
+  assert.equal(host?.value, "10.0.0.9");
+  assert.equal(port?.value, "3307");
+  assert.deepEqual(backend.argsFor("save_connection"), []);
+
+  await click(view, "Save");
+
+  // Writing the profile is only half of it: the session that was open becomes
+  // that connection, so it is not offered for saving again and the next launch
+  // brings it back.
+  assert.deepEqual(backend.argsFor("set_session_profile"), [
+    { connectionId: "s3", profileId: "p-new" },
+  ]);
+  assert.equal(
+    useWorkspace.getState().sessions.find((session) => session.id === "s3")?.profileId,
+    "p-new",
+  );
+  assert.deepEqual(useWorkspace.getState().rememberedProfileIds, ["p-new"]);
+  assert.deepEqual(useWorkspace.getState().adhocConfigs, {});
+});
+
+test("a session that came from a profile offers editing it instead", async (t) => {
+  const { view } = await open(t);
+
+  const mysqlRoot = roots(view).find((root) => root.textContent?.includes("Local MySQL 5.6"));
+  assert.ok(mysqlRoot, "no root for the MySQL session");
+  await act(async () => {
+    mysqlRoot.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: 40 }));
+  });
+
+  assert.match(view.text(), /Disconnect/);
+  // It already is a connection, so there is nothing to save — only to change.
+  assert.doesNotMatch(view.text(), /Save this connection/);
+  await click(view, "Edit connection…");
+
+  assert.match(view.text(), /Edit connection/);
+  const host = view.container.querySelector("#field-host") as HTMLInputElement | null;
+  assert.equal(host?.value, "127.0.0.1");
+});
+
 test("a connection's own menu closes just that connection", async (t) => {
   const { backend, view } = await open(t);
 
@@ -400,6 +519,16 @@ function pendingRoot(view: MountedComponent, name: string) {
   return view.container.querySelector(`button[aria-label="Connect to ${name}"]`);
 }
 
+/**
+ * Assert that no dimmed root is offered for `name`. Written as a boolean rather
+ * than `assert.equal(node, null)`: on failure the latter hands a DOM node to
+ * node's `inspect`, which walks it and takes the whole test run down with it
+ * instead of reporting one failing test.
+ */
+function assertNoPendingRoot(view: MountedComponent, name: string, why: string) {
+  assert.ok(pendingRoot(view, name) === null, `${name} was offered as a remembered root ${why}`);
+}
+
 /** A workspace where one remembered server is closed, with or without a password. */
 function oneClosedConnection(profile: ConnectionProfile, open = false) {
   useWorkspace.setState({
@@ -422,7 +551,7 @@ test("a remembered connection that is not open is offered, and one click reopens
   assert.ok(pendingRoot(view, "Local PostgreSQL 16"), "the closed connection is not offered");
   assert.match(view.text(), /was open/);
   // The one already open is a normal root, not offered a second time.
-  assert.equal(pendingRoot(view, "Local MySQL 5.6"), null);
+  assertNoPendingRoot(view, "Local MySQL 5.6", "because it is already open");
   assert.equal(roots(view).length, 1);
 
   await clickLabelled(view, "Connect to Local PostgreSQL 16");
@@ -452,14 +581,58 @@ test("a remembered server without a stored password asks for it, then stores it"
   await typeInto(view, "#connect-password", "hunter2");
   await click(view, "Connect");
 
-  // The password is stored with the connection first — that is what lets the
-  // next launch reopen this server instead of asking again.
+  // The typed password goes out with the connect itself; it is stored with the
+  // profile only after that connect has worked — what the user typed must not be
+  // written down and retried on every launch if it was a typo.
+  assert.deepEqual(backend.argsFor("connect"), [
+    { input: { profileId: "p3", password: "hunter2" } },
+  ]);
   const saved = backend.argsFor("save_connection")[0]?.input as Record<string, unknown>;
   assert.equal(saved.password, "hunter2");
   assert.equal(saved.id, "p3");
-  assert.deepEqual(backend.argsFor("connect"), [{ input: { profileId: "p3" } }]);
+  const commands = backend.sent.map((entry) => entry.command);
+  assert.ok(
+    commands.indexOf("connect") < commands.indexOf("save_connection"),
+    "the password was stored before the connect was known to work",
+  );
   assert.equal(useWorkspace.getState().rememberedProfileIds.includes("p3"), true);
-  assert.equal(pendingRoot(view, "Reporting server"), null);
+  assertNoPendingRoot(view, "Reporting server", "after connecting to it");
+});
+
+test("a password can be used for one connection without being stored", async (t) => {
+  const backend = installTestBackend(replies());
+  cleanup(t, backend);
+  oneClosedConnection(passwordlessProfile);
+  const view = await mounted();
+  t.after(view.unmount);
+
+  await clickLabelled(view, "Connect to Reporting server");
+  await typeInto(view, "#connect-password", "hunter2");
+
+  const remember = view.container.querySelector("#connect-remember") as HTMLInputElement | null;
+  assert.ok(remember, "no 'Save with this connection' box in the prompt");
+  assert.equal(remember.checked, true);
+  await act(async () => {
+    remember.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.equal(remember.checked, false);
+  assert.match(view.text(), /Used for this connection only/);
+
+  await click(view, "Connect");
+
+  // The password still goes out with the connect, but the profile is left
+  // exactly as it was — the next launch asks for it again rather than reopening
+  // the server with a password the user did not want written down.
+  assert.deepEqual(backend.argsFor("connect"), [
+    { input: { profileId: "p3", password: "hunter2" } },
+  ]);
+  assert.deepEqual(backend.argsFor("save_connection"), []);
+  assert.equal(
+    useWorkspace.getState().profiles.find((profile) => profile.id === "p3")?.hasPassword,
+    false,
+  );
+  assertNoPendingRoot(view, "Reporting server", "after connecting to it");
 });
 
 test("forgetting a remembered connection stops offering it", async (t) => {
@@ -477,12 +650,57 @@ test("forgetting a remembered connection stops offering it", async (t) => {
   assert.match(view.text(), /Forget/);
   await click(view, "Forget");
 
-  assert.equal(pendingRoot(view, "Reporting server"), null);
+  assertNoPendingRoot(view, "Reporting server", "after forgetting it");
   // Forgetting is persistent: the stored list no longer carries the profile.
   const written = backend.argsFor("set_settings").at(-1)?.value as {
     connections: { open: string[] };
   };
   assert.deepEqual(written.connections.open, ["p1"]);
+});
+
+test("'Reconnect on launch' off hides the remembered roots as well", async (t) => {
+  const backend = installTestBackend(replies());
+  cleanup(t, backend);
+  oneClosedConnection(postgresProfile, true);
+  // Off means no part of the last session is offered — not reopening it and not
+  // drawing it as a dimmed root either.
+  useWorkspace.setState({
+    settings: mergeSettings({ general: { reconnectOnLaunch: false } }),
+  });
+  const view = await mounted();
+  t.after(view.unmount);
+
+  assertNoPendingRoot(view, "Local PostgreSQL 16", "with 'Reconnect on launch' off");
+  assert.doesNotMatch(view.text(), /was open/);
+  // The connection that is actually open is unaffected.
+  assert.equal(roots(view).length, 1);
+});
+
+test("coming back to the window re-reads only the active connection", async (t) => {
+  const backend = installTestBackend(replies());
+  cleanup(t, backend);
+  twoConnections();
+  const view = await mounted();
+  t.after(view.unmount);
+
+  // Both roots read their database list once when they mount.
+  assert.deepEqual(backend.argsFor("list_databases"), [
+    { connectionId: "s1" },
+    { connectionId: "s2" },
+  ]);
+
+  await act(async () => {
+    window.dispatchEvent(new Event("focus"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  // Only the connection the user is looking at is re-read: the refresh must not
+  // fan out to every open server on each focus.
+  assert.deepEqual(backend.argsFor("list_databases"), [
+    { connectionId: "s1" },
+    { connectionId: "s2" },
+    { connectionId: "s1" },
+  ]);
 });
 
 test("with nothing connected the panel still asks for a connection", async (t) => {

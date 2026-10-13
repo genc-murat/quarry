@@ -42,6 +42,20 @@ impl SessionManager {
         self.sessions.write().await.remove(id)
     }
 
+    /// Point an open session at the profile it was saved as. The connection is
+    /// untouched — only what the session stands for changes — so `list_sessions`
+    /// reports it as profile-backed from here on. Returns `false` for an unknown
+    /// session.
+    pub async fn set_profile(&self, id: &str, profile_id: &str) -> bool {
+        match self.sessions.write().await.get_mut(id) {
+            Some(entry) => {
+                entry.profile_id = profile_id.to_string();
+                true
+            }
+            None => false,
+        }
+    }
+
     pub async fn list(&self) -> Vec<SessionInfo> {
         self.sessions
             .read()

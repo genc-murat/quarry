@@ -8,6 +8,7 @@ import type {
   CreateTableRequest,
   DatabaseInfo,
   DriverDescriptor,
+  ImportConnectionsSummary,
   ObjectActionRequest,
   ObjectDetail,
   OpenSessionRequest,
@@ -50,20 +51,54 @@ function queryLanguageFor(
 }
 
 /**
+ * One line about what an import did. A connection that was left as it was is
+ * worth saying out loud: it is the difference between "that file worked" and
+ * "did the settings I changed here survive?", and the same for an entry whose
+ * driver this build does not have.
+ */
+function describeImport(summary: ImportConnectionsSummary): string {
+  const parts: string[] = [];
+  // Counts only where they say something: "0 added" is noise beside a title
+  // that already reads "Nothing new to import".
+  if (summary.imported > 0) {
+    parts.push(counted(summary.imported, "connection added", "connections added"));
+  }
+  if (summary.skipped > 0) {
+    parts.push(
+      counted(summary.skipped, "already here, left as it was", "already here, left as they were"),
+    );
+  }
+  if (summary.unsupported.length > 0) {
+    parts.push(`no driver for ${summary.unsupported.join(", ")}`);
+  }
+  return parts.join(" · ");
+}
+
+/** `1 connection added` / `3 connections added`. */
+function counted(count: number, singular: string, plural: string): string {
+  return `${count} ${count === 1 ? singular : plural}`;
+}
+
+/**
  * Whether a connection can be opened without asking the user anything: its
  * password is already stored, or the driver's form has no password field at all
  * (a file-backed SQLite profile, say). A server whose password was never saved
  * is left for the user to connect by hand, so a launch never fails at something
  * it cannot fix on its own — and the explorer offers it as a dimmed root
- * instead, where clicking it asks for the password.
+ * instead, where clicking it asks for the password. The same answer is given for
+ * a driver the registry does not know, which cannot be assumed passwordless.
  */
 export function canConnectWithoutPrompt(
   profile: ConnectionProfile,
   drivers: DriverDescriptor[],
 ): boolean {
+  const driver = drivers.find((candidate) => candidate.id === profile.driver);
+  // A driver the registry does not know is not a passwordless one: nothing here
+  // can say what it needs, so the profile is left for the user to open by hand
+  // rather than being attempted on every launch.
+  if (!driver) return false;
   if (profile.hasPassword) return true;
-  const fields = drivers.find((driver) => driver.id === profile.driver)?.configFields ?? [];
-  return !fields.some((field) => field.fieldType === "password");
+  return !driver.configFields.some((field) => field.fieldType === "password");
 }
 
 /** `a`, `a, b` or `a, b +2 more` — keeps a launch toast to a single line. */
@@ -173,6 +208,13 @@ function suggestedScriptName(state: { tabs: QueryTab[] }, tabId: string): string
   return `${slug || "query"}.sql`;
 }
 
+/**
+ * The connection info a session was opened with when it has no profile behind
+ * it. Kept per session so such a session can still be saved as a connection
+ * later — the session itself only carries its name and what the server reports.
+ */
+export type AdHocConfig = NonNullable<OpenSessionRequest["config"]>;
+
 export interface Toast {
   id: string;
   title: string;
@@ -188,6 +230,14 @@ interface WorkspaceState {
   activeSessionId: string | null;
   /** Profiles that were connected when the app was last closed. */
   rememberedProfileIds: string[];
+  /** What each profile-less session was opened with, keyed by session id. */
+  adhocConfigs: Record<string, AdHocConfig>;
+  /**
+   * Set when a connection's settings were edited while a session for it is open:
+   * that session still holds the settings it connected with, so the app offers
+   * to reopen it instead of silently keeping the stale connection.
+   */
+  reconnectOffer: { sessionId: string; name: string } | null;
   databasesBySession: Record<string, DatabaseInfo[]>;
   /** Table/column metadata per `sessionId||database`, used for editor completion. */
   columnsCache: Record<string, TableColumns[]>;
@@ -213,13 +263,50 @@ interface WorkspaceState {
   refreshConnections: () => Promise<void>;
   saveConnection: (input: SaveConnectionInput) => Promise<ConnectionProfile | null>;
   deleteConnection: (id: string) => Promise<void>;
+  /**
+   * Write every saved connection to `path`, so they can be carried to another
+   * machine. Only settings travel: passwords stay in this machine's vault. The
+   * path comes from the native picker (`connectionFiles.ts`), so the caller
+   * decides the location and this only reports what came of it.
+   */
+  exportConnectionsTo: (path: string) => Promise<number | null>;
+  /**
+   * Read a transfer file back into the connection list. Connections already
+   * present are left as they are and reported instead of being duplicated, and
+   * nothing is connected: the imported profiles are what the next connect uses.
+   */
+  importConnectionsFrom: (path: string) => Promise<ImportConnectionsSummary | null>;
   connect: (input: OpenSessionRequest, label?: string) => Promise<SessionInfo | null>;
   /**
    * Reopen a remembered connection that is currently closed. A password is only
    * needed when the profile has none stored; when it is given it is saved with
-   * the profile, which is what lets the next launch reopen it silently.
+   * the profile — which is what lets the next launch reopen it silently — unless
+   * `rememberPassword` is false, in which case it is used for this connection
+   * only and the profile is left as it was.
    */
-  connectProfile: (profileId: string, password?: string) => Promise<SessionInfo | null>;
+  connectProfile: (
+    profileId: string,
+    password?: string,
+    rememberPassword?: boolean,
+  ) => Promise<SessionInfo | null>;
+  /**
+   * Point a live session at the profile it has just been saved as. The
+   * connection is kept — the session only stops being ad-hoc, so the explorer
+   * treats it as a saved connection and the next launch reopens it.
+   */
+  bindSessionToProfile: (sessionId: string, profileId: string) => Promise<void>;
+  /**
+   * Offer to reconnect the open session that still uses a connection's previous
+   * settings. Does nothing when nothing is open for it.
+   */
+  offerReconnect: (profileId: string) => void;
+  dismissReconnect: () => void;
+  /**
+   * Reopen the offered session from its profile, so the edited settings take
+   * effect. The old session is closed only once the new connection is up, so a
+   * connect that fails leaves the working one in place.
+   */
+  reconnectSession: () => Promise<boolean>;
   /** Stop offering a remembered connection: it is not reopened next launch. */
   forgetProfile: (profileId: string) => void;
   disconnect: (sessionId: string) => Promise<void>;
@@ -281,6 +368,8 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   rememberedProfileIds: [],
+  adhocConfigs: {},
+  reconnectOffer: null,
   databasesBySession: {},
   columnsCache: {},
 
@@ -420,7 +509,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     set({ profiles });
   },
 
-  connectProfile: async (profileId, password) => {
+  connectProfile: async (profileId, password, rememberPassword = true) => {
     const profile = get().profiles.find((candidate) => candidate.id === profileId);
     if (!profile) {
       get().pushToast({
@@ -430,24 +519,83 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       });
       return null;
     }
-    // A password typed into the explorer's prompt is stored with the connection,
-    // exactly as saving it in the connection dialog would: that is what lets the
-    // next launch reopen this server instead of asking again. Saving goes through
-    // `ipc` directly so the user gets one toast (the connect) rather than two.
-    if (password) {
-      try {
-        await ipc.saveConnection({ ...profile, password });
-        await get().refreshConnections();
-      } catch (error) {
-        get().pushToast({
-          title: "Could not save the password",
-          description: errorMessage(error),
-          variant: "error",
-        });
-        return null;
-      }
+    // A password typed into the explorer's prompt is tried as a one-off first, so
+    // a typo fails the connect instead of being written into the profile and
+    // retried on every launch from then on.
+    const session = await get().connect(password ? { profileId, password } : { profileId });
+    // The password has done its job — and when the user cleared "Save with this
+    // connection", that is all it was ever for: only a remembered one is written.
+    if (!session || !password || !rememberPassword) return session;
+    // It worked: store it with the connection, exactly as saving it in the
+    // connection dialog would, so the next launch reopens this server silently.
+    // Saving goes through `ipc` directly so the user gets one toast (the connect)
+    // rather than two.
+    try {
+      await ipc.saveConnection({ ...profile, password });
+      await get().refreshConnections();
+    } catch (error) {
+      get().pushToast({
+        title: "Could not save the password",
+        description: errorMessage(error),
+        variant: "error",
+      });
     }
-    return get().connect({ profileId });
+    return session;
+  },
+
+  bindSessionToProfile: async (sessionId, profileId) => {
+    if (!get().sessions.some((session) => session.id === sessionId)) return;
+    try {
+      await ipc.setSessionProfile(sessionId, profileId);
+    } catch (error) {
+      // The backend remembers this too, so a reload keeps the session pointing
+      // at its profile; failing to record it costs only that, so the local
+      // change below still goes ahead.
+      get().pushToast({
+        title: "Could not record the saved connection",
+        description: errorMessage(error),
+        variant: "error",
+      });
+    }
+    set((state) => {
+      // The session now stands for a profile: there is nothing left to save.
+      const adhocConfigs = { ...state.adhocConfigs };
+      delete adhocConfigs[sessionId];
+      return {
+        sessions: state.sessions.map((session) =>
+          session.id === sessionId ? { ...session, profileId } : session,
+        ),
+        rememberedProfileIds: state.rememberedProfileIds.includes(profileId)
+          ? state.rememberedProfileIds
+          : [...state.rememberedProfileIds, profileId],
+        adhocConfigs,
+      };
+    });
+    get().persistSettings();
+  },
+
+  offerReconnect: (profileId) => {
+    const session = get().sessions.find((candidate) => candidate.profileId === profileId);
+    if (!session) return;
+    set({ reconnectOffer: { sessionId: session.id, name: session.name } });
+  },
+
+  dismissReconnect: () => set({ reconnectOffer: null }),
+
+  reconnectSession: async () => {
+    const offer = get().reconnectOffer;
+    // Single-shot: whatever the answer, the offer is done with.
+    set({ reconnectOffer: null });
+    if (!offer) return false;
+    const session = get().sessions.find((candidate) => candidate.id === offer.sessionId);
+    if (!session?.profileId) return false;
+    const connected = await get().connect({ profileId: session.profileId });
+    // Only once the new connection is up: a connect that fails leaves the
+    // working session in place. The fresh session stands for the profile, so
+    // closing the old one still keeps it remembered for the next launch.
+    if (!connected) return false;
+    await get().disconnect(offer.sessionId);
+    return true;
   },
 
   forgetProfile: (profileId) => {
@@ -466,6 +614,47 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     } catch (error) {
       get().pushToast({
         title: "Could not save connection",
+        description: errorMessage(error),
+        variant: "error",
+      });
+      return null;
+    }
+  },
+
+  exportConnectionsTo: async (path) => {
+    try {
+      const count = await ipc.exportConnections(path);
+      get().pushToast({
+        title: count === 1 ? "Exported 1 connection" : `Exported ${count} connections`,
+        description:
+          "Passwords are not in the file — the other machine asks for each one once, on its first connect.",
+        variant: "success",
+      });
+      return count;
+    } catch (error) {
+      get().pushToast({
+        title: "Could not export connections",
+        description: errorMessage(error),
+        variant: "error",
+      });
+      return null;
+    }
+  },
+
+  importConnectionsFrom: async (path) => {
+    try {
+      const summary = await ipc.importConnections(path);
+      // The list the user is looking at has to show what arrived.
+      await get().refreshConnections();
+      get().pushToast({
+        title: summary.imported > 0 ? "Connections imported" : "Nothing new to import",
+        description: describeImport(summary),
+        variant: summary.imported > 0 ? "success" : "info",
+      });
+      return summary;
+    } catch (error) {
+      get().pushToast({
+        title: "Could not import connections",
         description: errorMessage(error),
         variant: "error",
       });
@@ -500,6 +689,11 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
           session.profileId && !state.rememberedProfileIds.includes(session.profileId)
             ? [...state.rememberedProfileIds, session.profileId]
             : state.rememberedProfileIds,
+        // Keep what it was opened with, so it can be turned into a saved
+        // connection later without asking for the same values again.
+        adhocConfigs: input.config
+          ? { ...state.adhocConfigs, [session.id]: input.config }
+          : state.adhocConfigs,
       }));
       // Seed the active tab so queries land on the new session.
       const activeTab = get().tabs.find((t) => t.id === get().activeTabId);
@@ -540,6 +734,9 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       const sessions = state.sessions.filter((s) => s.id !== sessionId);
       const databasesBySession = { ...state.databasesBySession };
       delete databasesBySession[sessionId];
+      // A closed session has no values left to save into a connection.
+      const adhocConfigs = { ...state.adhocConfigs };
+      delete adhocConfigs[sessionId];
       const stillOpen = sessions.some((session) => session.profileId === closedProfile);
       const rememberedProfileIds =
         !closedProfile || stillOpen
@@ -554,7 +751,14 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       );
       const activeSessionId =
         state.activeSessionId === sessionId ? (sessions[0]?.id ?? null) : state.activeSessionId;
-      return { sessions, databasesBySession, columnsCache, activeSessionId, rememberedProfileIds };
+      return {
+        sessions,
+        databasesBySession,
+        adhocConfigs,
+        columnsCache,
+        activeSessionId,
+        rememberedProfileIds,
+      };
     });
     // Persist the smaller (or unchanged) set: a closed connection is no longer
     // offered for the next launch.

@@ -77,6 +77,24 @@ impl ProfileStore {
         self.persist()
     }
 
+    /// Insert or update several profiles in a single write, so an import
+    /// touches the file once instead of once per connection.
+    pub fn upsert_many(&self, incoming: Vec<ConnectionProfile>) -> Result<()> {
+        if incoming.is_empty() {
+            return Ok(());
+        }
+        {
+            let mut profiles = self.profiles.write().unwrap();
+            for profile in incoming {
+                match profiles.iter_mut().find(|p| p.id == profile.id) {
+                    Some(existing) => *existing = profile,
+                    None => profiles.push(profile),
+                }
+            }
+        }
+        self.persist()
+    }
+
     pub fn delete(&self, id: &str) -> Result<bool> {
         let removed = {
             let mut profiles = self.profiles.write().unwrap();
