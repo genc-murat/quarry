@@ -1,4 +1,4 @@
-import { Plus, Table2, X } from "lucide-react";
+import { FileCode2, Plus, Table2, X } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useWorkspace } from "@/stores/workspace";
@@ -28,6 +28,9 @@ export function QueryTabs() {
               <span className="h-2 w-2 animate-pulse rounded-full bg-primary" />
             ) : null}
             {tab.kind === "object" ? <Table2 className="h-3 w-3 shrink-0 text-primary" /> : null}
+            {tab.kind === "script" ? (
+              <FileCode2 className="h-3 w-3 shrink-0 text-primary" />
+            ) : null}
             <span className="truncate">{tab.title}</span>
             <span
               role="button"

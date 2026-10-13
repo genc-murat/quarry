@@ -9,6 +9,7 @@ mod ddl;
 mod drivers;
 mod error;
 mod models;
+mod scripts;
 mod secrets;
 mod session;
 mod sql_split;
@@ -55,6 +56,9 @@ pub fn run() {
                 app.handle()
                     .plugin(tauri_plugin_updater::Builder::new().build())?;
                 app.handle().plugin(tauri_plugin_process::init())?;
+                // Native file picker for opening/saving SQL scripts. The disk
+                // half is `scripts.rs`; this only supplies the dialog.
+                app.handle().plugin(tauri_plugin_dialog::init())?;
             }
 
             let config_dir = app
@@ -103,6 +107,7 @@ pub fn run() {
             commands::delete_snippet,
             commands::get_settings,
             commands::set_settings,
+            scripts::write_script_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

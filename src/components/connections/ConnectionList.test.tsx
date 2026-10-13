@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 
+import { act } from "react";
+
 import { ConnectionList } from "./ConnectionList.tsx";
 import { installTestBackend, type TestBackend } from "@/lib/testBackend.ts";
 import { click, closeDom, mount, type MountedComponent } from "@/lib/testRender.tsx";
@@ -10,6 +12,7 @@ import type {
   DriverDescriptor,
   SessionInfo,
 } from "@/lib/types.ts";
+
 import { useWorkspace } from "@/stores/workspace.ts";
 
 const driver = (
@@ -209,4 +212,77 @@ test("an unscripted command surfaces as an error rather than an empty list", asy
   const view = await mount(<ConnectionList />);
   t.after(view.unmount);
   assert.match(view.text(), /No connections yet\./);
+});
+
+/** Right-click a connection card and settle the menu's state update. */
+async function openConnectionMenu(view: MountedComponent, name: string) {
+  // The card is the only `bg-card` element outside the menu, and the open menu
+  // carries that class too, so it is excluded explicitly rather than by order.
+  const card = [...view.container.querySelectorAll("div")].find(
+    (candidate) =>
+      candidate.className.includes("bg-card") &&
+      !candidate.closest('[role="menu"]') &&
+      candidate.textContent?.includes(name),
+  );
+  assert.ok(card, `no connection card for ${name}`);
+  await act(async () => {
+    card.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, clientX: 40, clientY: 40 }));
+  });
+}
+
+test("right-clicking a connection shows the SQL editor group", async (t) => {
+  await boot(t);
+  const view = await mount(<ConnectionList />);
+  t.after(view.unmount);
+
+  await openConnectionMenu(view, "Local MySQL 5.6");
+
+  assert.match(view.text(), /SQL editor/);
+  assert.match(view.text(), /New SQL script/);
+  assert.match(view.text(), /Open SQL console/);
+});
+
+test("Open SQL console opens a console tab bound to the connection", async (t) => {
+  await boot(t);
+  const view = await mount(<ConnectionList />);
+  t.after(view.unmount);
+
+  await openConnectionMenu(view, "Local MySQL 5.6");
+  await click(view, "Open SQL console");
+
+  assert.equal(useWorkspace.getState().activeSessionId, "s1");
+  const consoleTab = useWorkspace.getState().tabs.at(-1);
+  assert.equal(consoleTab?.kind, "query");
+  assert.equal(consoleTab?.sessionId, "s1");
+});
+
+test("New SQL script opens a file-backed script tab", async (t) => {
+  await boot(t);
+  const view = await mount(<ConnectionList />);
+  t.after(view.unmount);
+
+  await openConnectionMenu(view, "Local MySQL 5.6");
+  await click(view, "New SQL script");
+
+  const scriptTab = useWorkspace.getState().tabs.at(-1);
+  assert.equal(scriptTab?.kind, "script");
+  // The browser has no picker, so the suggested `.sql` name is accepted as-is.
+  assert.match(String(scriptTab?.filePath), /\.sql$/);
+  assert.equal(scriptTab?.title, String(scriptTab?.filePath).split("/").pop());
+});
+
+test("a script for a disconnected connection is left unbound", async (t) => {
+  await boot(t);
+  const view = await mount(<ConnectionList />);
+  t.after(view.unmount);
+  // The MySQL profile is the connected one, so an unbound script must not pick
+  // up its session just because that session is active.
+  assert.equal(useWorkspace.getState().activeSessionId, "s1");
+
+  await openConnectionMenu(view, "Sample shop.db");
+  await click(view, "New SQL script");
+
+  const scriptTab = useWorkspace.getState().tabs.at(-1);
+  assert.equal(scriptTab?.kind, "script");
+  assert.equal(scriptTab?.sessionId, null);
 });

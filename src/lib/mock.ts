@@ -532,6 +532,10 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "get_settings":
       return respond(SETTINGS);
+    // The browser has no disk: `scriptFiles.ts` downloads instead of calling
+    // this, so the reply only keeps the command set total.
+    case "write_script_file":
+      return respond(undefined);
     default:
       return respond(undefined);
   }

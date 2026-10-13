@@ -1,8 +1,9 @@
 import { useState } from "react";
-import { Loader2, Pencil, Plug, Plus, ShieldCheck, Trash2 } from "lucide-react";
+import { FilePlus, Loader2, Pencil, Plug, Plus, ShieldCheck, Terminal, Trash2 } from "lucide-react";
 
 import { ConnectionDialog } from "@/components/connections/ConnectionDialog";
 import { Button } from "@/components/ui/button";
+import { ContextMenu, type MenuEntry } from "@/components/ui/context-menu";
 import { cn } from "@/lib/utils";
 import type { ConnectionProfile } from "@/lib/types";
 import { useWorkspace } from "@/stores/workspace";
@@ -16,10 +17,13 @@ export function ConnectionList() {
   const deleteConnection = useWorkspace((s) => s.deleteConnection);
   const setActiveSession = useWorkspace((s) => s.setActiveSession);
   const activeSessionId = useWorkspace((s) => s.activeSessionId);
+  const newScript = useWorkspace((s) => s.newScript);
+  const openConsole = useWorkspace((s) => s.openConsole);
 
   const [dialogOpen, setDialogOpen] = useState(false);
   const [editing, setEditing] = useState<ConnectionProfile | null>(null);
   const [connecting, setConnecting] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; profile: ConnectionProfile } | null>(null);
 
   const accentFor = (driverId: string) =>
     drivers.find((d) => d.id === driverId)?.accentColor ?? "var(--primary)";
@@ -39,6 +43,30 @@ export function ConnectionList() {
     return `${profile.username}@${profile.host}:${profile.port}${
       profile.database ? `/${profile.database}` : ""
     }`;
+  };
+
+  // The SQL editor group DBeaver hangs off a connection. A script can be saved
+  // without a connection (it is just a file); a console needs an open one.
+  const connectionMenu = (profile: ConnectionProfile): MenuEntry[] => {
+    const session = sessionForProfile(profile.id);
+    return [
+      { type: "label", label: profile.name },
+      { type: "label", label: "SQL editor" },
+      {
+        label: "New SQL script",
+        icon: <FilePlus className="h-3.5 w-3.5" />,
+        onSelect: () => void newScript(session?.id ?? null),
+      },
+      {
+        label: "Open SQL console",
+        icon: <Terminal className="h-3.5 w-3.5" />,
+        disabled: !session,
+        hint: session ? undefined : "connect first",
+        onSelect: () => {
+          if (session) void openConsole(session.id);
+        },
+      },
+    ];
   };
 
   return (
@@ -88,6 +116,10 @@ export function ConnectionList() {
           return (
             <div
               key={profile.id}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setMenu({ x: event.clientX, y: event.clientY, profile });
+              }}
               className={cn(
                 "group rounded-lg border bg-card p-2.5 transition-colors",
                 isActive ? "border-primary/60" : "border-border hover:border-border/80",
@@ -175,6 +207,15 @@ export function ConnectionList() {
           );
         })}
       </div>
+
+      {menu ? (
+        <ContextMenu
+          entries={connectionMenu(menu.profile)}
+          x={menu.x}
+          y={menu.y}
+          onClose={() => setMenu(null)}
+        />
+      ) : null}
 
       <ConnectionDialog
         open={dialogOpen}

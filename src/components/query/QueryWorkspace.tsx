@@ -5,7 +5,10 @@ import { indentUnit } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { EditorView } from "@codemirror/view";
-import { Bookmark, ListTree, Play, Square, Star, Terminal } from "lucide-react";
+import { Bookmark, ListTree, Play, Save, ScrollText, Square, Star, Terminal } from "lucide-react";
+
+import { activeStatementHighlight } from "@/lib/sqlHighlight";
+import { sqlToRun } from "@/lib/sqlScript";
 
 import { ObjectInspector } from "@/components/objects/ObjectInspector";
 import { DatabaseSelect } from "@/components/query/DatabaseSelect";
@@ -28,6 +31,7 @@ export function QueryWorkspace() {
   const explainTab = useWorkspace((s) => s.explainTab);
   const cancelTab = useWorkspace((s) => s.cancelTab);
   const saveSnippet = useWorkspace((s) => s.saveSnippet);
+  const saveScript = useWorkspace((s) => s.saveScript);
   const toggleFavorite = useWorkspace((s) => s.toggleFavorite);
   const favorites = useWorkspace((s) => s.favorites);
   const saveRowChanges = useWorkspace((s) => s.saveRowChanges);
@@ -45,6 +49,9 @@ export function QueryWorkspace() {
   const [snippetName, setSnippetName] = useState("");
   const dragging = useRef(false);
   const containerRef = useRef<HTMLDivElement>(null);
+  // Latest CodeMirror selection, so Run can resolve a statement without React
+  // state churn on every cursor move.
+  const selectionRef = useRef<{ from: number; to: number }>({ from: 0, to: 0 });
 
   const tab = tabs.find((t) => t.id === activeTabId) ?? null;
   const session = sessions.find((s) => s.id === tab?.sessionId) ?? null;
@@ -60,6 +67,11 @@ export function QueryWorkspace() {
   useEffect(() => {
     if (sessionId && database) void loadColumns(sessionId, database);
   }, [sessionId, database, loadColumns]);
+
+  // A different tab's cursor is meaningless here; start from the top again.
+  useEffect(() => {
+    selectionRef.current = { from: 0, to: 0 };
+  }, [tab?.id]);
 
   const schema = useMemo<SQLNamespace | undefined>(() => {
     if (!sessionId || !database) return undefined;
@@ -125,6 +137,14 @@ export function QueryWorkspace() {
       ...(editor.wordWrap ? [EditorView.lineWrapping] : []),
       EditorState.tabSize.of(Number(editor.tabSize)),
       indentUnit.of(" ".repeat(Number(editor.tabSize))),
+      // Track the cursor so Run can pick the statement under it.
+      EditorView.updateListener.of((update) => {
+        if (update.selectionSet || update.docChanged) {
+          const selection = update.state.selection.main;
+          selectionRef.current = { from: selection.from, to: selection.to };
+        }
+      }),
+      activeStatementHighlight(),
     ],
     [usesSql, dialect, schema, editor.wordWrap, editor.tabSize],
   );
@@ -159,6 +179,22 @@ export function QueryWorkspace() {
     return <ObjectInspector objectRef={tab.objectRef} />;
   }
 
+  // The SQL a Run/Explain targets: the selection when there is one, otherwise
+  // the statement under the cursor.
+  function currentSql(): string {
+    if (!tab) return "";
+    const { from, to } = selectionRef.current;
+    return sqlToRun(tab.sql, from, to);
+  }
+
+  function runCurrent() {
+    if (tab) void runTab(tab.id, currentSql());
+  }
+
+  function explainCurrent() {
+    if (tab) void explainTab(tab.id, currentSql());
+  }
+
   function handleSaveSnippet() {
     const name = snippetName.trim();
     if (!name || !tab) return;
@@ -188,22 +224,33 @@ export function QueryWorkspace() {
         ) : (
           <Button
             size="sm"
-            onClick={() => runTab(tab.id)}
+            onClick={runCurrent}
             disabled={!session}
-            title="Run (⌘/Ctrl + Enter)"
+            title="Run statement under cursor / selection (⌘/Ctrl + Enter)"
           >
             <Play className="h-3.5 w-3.5" />
             Run
           </Button>
         )}
 
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => void runTab(tab.id, tab.sql)}
+          disabled={!session || tab.running || !tab.sql.trim()}
+          title="Run whole script (⌘/Ctrl + Alt + Enter)"
+        >
+          <ScrollText className="h-3.5 w-3.5" />
+          Script
+        </Button>
+
         {supportsExplain ? (
           <Button
             size="sm"
             variant="outline"
-            onClick={() => explainTab(tab.id)}
+            onClick={explainCurrent}
             disabled={!session || tab.running || tab.explaining}
-            title="Explain (⌘/Ctrl + Shift + Enter)"
+            title="Explain statement under cursor / selection (⌘/Ctrl + Shift + Enter)"
           >
             <ListTree className="h-3.5 w-3.5" />
             Explain
@@ -221,6 +268,22 @@ export function QueryWorkspace() {
           Favorite
         </Button>
 
+        {tab.kind === "script" ? (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void saveScript(tab.id)}
+            title={
+              tab.filePath
+                ? `Save to ${tab.filePath} (⌘/Ctrl + S)`
+                : "Save script as… (⌘/Ctrl + S)"
+            }
+          >
+            <Save className="h-3.5 w-3.5" />
+            Save file
+          </Button>
+        ) : null}
+
         <Button
           size="sm"
           variant="ghost"
@@ -229,7 +292,7 @@ export function QueryWorkspace() {
           title="Save as snippet"
         >
           <Bookmark className="h-3.5 w-3.5" />
-          Save
+          Save query
         </Button>
 
         <div className="flex items-center gap-1.5">
@@ -270,6 +333,19 @@ export function QueryWorkspace() {
       <div
         onKeyDown={(event) => {
           if (!(event.metaKey || event.ctrlKey)) return;
+          // A plain ⌘/Ctrl + S writes a script tab's `.sql` file. Another tab
+          // kind has no file to write, and a modified shortcut (⌘⇧S, ⌘⌥S) is
+          // somebody else's — both are left alone.
+          if (
+            event.key.toLowerCase() === "s" &&
+            !event.shiftKey &&
+            !event.altKey &&
+            tab.kind === "script"
+          ) {
+            event.preventDefault();
+            void saveScript(tab.id);
+            return;
+          }
           if (event.key === "." && tab.running) {
             event.preventDefault();
             void cancelTab(tab.id);
@@ -280,9 +356,12 @@ export function QueryWorkspace() {
             if (tab.running) {
               void cancelTab(tab.id);
             } else if (event.shiftKey && supportsExplain) {
-              void explainTab(tab.id);
+              void explainTab(tab.id, currentSql());
+            } else if (event.altKey) {
+              // ⌘/Ctrl + Alt + Enter runs the whole script, not one statement.
+              void runTab(tab.id, tab.sql);
             } else {
-              void runTab(tab.id);
+              void runTab(tab.id, currentSql());
             }
           }
         }}

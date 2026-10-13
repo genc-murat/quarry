@@ -123,6 +123,10 @@ export const ipc = {
 
   getSettings: () => call<Record<string, unknown>>("get_settings"),
   setSettings: (value: Record<string, unknown>) => call<void>("set_settings", { value }),
+
+  /** Write a SQL script file (desktop; the native picker is `scriptFiles.ts`). */
+  writeScriptFile: (path: string, contents: string) =>
+    call<void>("write_script_file", { path, contents }),
 };
 
 /** Normalise an unknown thrown value into a readable message. */

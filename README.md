@@ -99,6 +99,7 @@ src-tauri/
     secrets.rs         # encrypted local vault (AES-256-GCM)
     store.rs           # profile + settings + saved-query persistence (JSON)
     sql_split.rs       # quote/comment-aware SQL splitter (+ tests)
+    scripts.rs         # read/write .sql script files (+ tests)
 src/
   components/          # layout, ui, connections, explorer, query, objects, history, snippets, settings
   lib/                 # typed IPC, updater, types, dev mock (fixtures + reply mapping), helpers
@@ -362,7 +363,7 @@ plain-text editor and suggest no SQL keywords/schema.)
   such as `decimal(12,2)`, `enum('new','paid','shipped')`.
 - **Qualified access** — both `orders.id` and `shop.orders.id` work.
 - **Keywords and functions** — according to the selected dialect (MySQL / PostgreSQL / SQLite).
-- Also manual triggering with `⌘/Ctrl + Space` and running with `⌘/Ctrl + Enter`.
+- Also manual triggering with `⌘/Ctrl + Space`, and the run shortcuts below.
 
 Schema information arrives in a single round: each driver answers a `list_table_columns` call with a
 single `information_schema` query (the default implementation in the trait walks the tables one by
@@ -383,6 +384,12 @@ the theme choice is stored in `localStorage`.
 
 ![The query workbench: the SQL editor, the results grid and the session it runs on](docs/screenshots/query-workbench.png)
 
+- **Run statement / Run script** — like DBeaver, `Run` (or `⌘/Ctrl + Enter`) executes only the
+  statement under the cursor, or the selected text when there is a selection; the statement that
+  will run is highlighted in the editor. `Script` (or `⌘/Ctrl + Alt + Enter`) runs the whole script.
+  A script is split by a quote/comment-aware scanner kept in step with the one the backend runs the
+  script with (`src/lib/sqlScript.ts` ↔ `src-tauri/src/sql_split.rs`), so a `;` inside a string,
+  comment or `BEGIN … END` body never ends a statement.
 - **Run / Stop** — a long-running query is stopped with the `Stop` button (or `⌘/Ctrl + .`).
   Both SQL drivers return `supportsCancel: true`: the server-side identity of the running connection
   is obtained (`SELECT CONNECTION_ID()` / `pg_backend_pid()`) and the cancel is issued from a
@@ -397,6 +404,14 @@ the theme choice is stored in `localStorage`.
 - **Saved queries** — the query in the editor is saved under a name; it is run, added to a new tab
   or deleted from the `Saved queries` panel. The driver/database hint is stored, and if a suitable
   session is open the query runs on that driver.
+- **SQL scripts and consoles** — right-clicking a connection offers the SQL editor group: **New SQL
+  script** opens a file-backed tab, **Open SQL console** a connection-bound one (disabled until the
+  connection is open). A *script* is written to a **real `.sql` file** chosen with the native save
+  dialog; picking a path only names the script, and `Save file` (or `⌘/Ctrl + S`) writes it, so the tab
+  shows the file name before anything reaches the disk. No connection is needed to save one: saving on
+  the desktop goes through `dialog:allow-save` to pick the path and the
+  `write_script_file` command (`scripts.rs`) to write it; in the browser demo the same action
+  downloads the `.sql` instead, so the flow stays reviewable without the shell.
 
 ## Explorer tree and object groups
 

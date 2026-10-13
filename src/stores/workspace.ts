@@ -29,6 +29,7 @@ import {
   templateSql,
 } from "@/lib/objects";
 import type { EditSource } from "@/lib/rowEdit";
+import { pickScriptPath, scriptName, writeScriptFile } from "@/lib/scriptFiles";
 import {
   mergeSettings,
   writeSetting,
@@ -75,8 +76,10 @@ export type SidebarView = "connections" | "explorer" | "schema" | "history" | "s
 export interface QueryTab {
   id: string;
   title: string;
-  /** `object` tabs render the inspector instead of a query editor. */
-  kind: "query" | "object";
+  /** `object` renders the inspector; `script` is a file-backed SQL script. */
+  kind: "query" | "object" | "script";
+  /** Set for `script` tabs once the user has chosen where it lives. */
+  filePath: string | null;
   sql: string;
   sessionId: string | null;
   database: string | null;
@@ -136,6 +139,17 @@ function saveLocalList<T>(key: string, value: T[]) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* keep the in-memory workspace available */ }
 }
 
+/** A default `.sql` file name derived from a script tab's title. */
+function suggestedScriptName(state: { tabs: QueryTab[] }, tabId: string): string {
+  const title = state.tabs.find((tab) => tab.id === tabId)?.title ?? "query";
+  const slug = title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return `${slug || "query"}.sql`;
+}
+
 export interface Toast {
   id: string;
   title: string;
@@ -180,11 +194,22 @@ interface WorkspaceState {
   setSidebar: (view: SidebarView) => void;
 
   newTab: (init?: Partial<QueryTab>) => string;
+  /** Open a new file-backed SQL script bound to a session. */
+  newScript: (sessionId: string | null) => Promise<string>;
+  /** Open an unsaved SQL console bound to a session (DBeaver's "SQL console"). */
+  openConsole: (sessionId: string) => Promise<string>;
+  /** Write a script tab to its `.sql` file, asking for a path the first time. */
+  saveScript: (tabId: string) => Promise<boolean>;
   closeTab: (id: string) => void;
   setActiveTab: (id: string) => void;
   updateTab: (id: string, patch: Partial<QueryTab>) => void;
-  runTab: (id: string) => Promise<void>;
-  explainTab: (id: string) => Promise<void>;
+  /**
+   * Run a tab. Without `sqlOverride` the whole editor text runs; the editor
+   * passes just the statement under the cursor (or the selection) so a Run
+   * behaves like DBeaver instead of executing the entire script.
+   */
+  runTab: (id: string, sqlOverride?: string) => Promise<void>;
+  explainTab: (id: string, sqlOverride?: string) => Promise<void>;
   cancelTab: (id: string) => Promise<void>;
   openObjectTab: (ref: ObjectRef) => string;
   loadObjectDetail: (ref: ObjectRef, force?: boolean) => Promise<ObjectDetail | null>;
@@ -420,12 +445,18 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     tabCounter += 1;
     const id = crypto.randomUUID();
     const state = get();
+    const kind = init?.kind ?? "query";
+    // An explicit `sessionId: null` means "no session" — a script can exist
+    // without a connection — so it must not fall back to the active one.
+    const sessionId =
+      init && "sessionId" in init ? (init.sessionId ?? null) : state.activeSessionId;
     const tab: QueryTab = {
       id,
-      title: init?.title ?? `Query ${tabCounter}`,
-      kind: "query",
+      title: init?.title ?? `${kind === "script" ? "Script" : "Query"} ${tabCounter}`,
+      kind,
+      filePath: init?.filePath ?? null,
       sql: init?.sql ?? "",
-      sessionId: init?.sessionId ?? state.activeSessionId,
+      sessionId,
       database: init?.database ?? null,
       objectRef: null,
       editSource: init?.editSource ?? null,
@@ -440,6 +471,67 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     };
     set({ tabs: [...state.tabs, tab], activeTabId: id });
     return id;
+  },
+
+  newScript: async (sessionId) => {
+    const id = get().newTab({ kind: "script", sessionId });
+    // Ask where the script lives right away, like DBeaver's "New SQL script".
+    // A cancelled picker leaves an untitled script the user can still type into.
+    try {
+      const path = await pickScriptPath(suggestedScriptName(get(), id));
+      if (path) get().updateTab(id, { filePath: path, title: scriptName(path) });
+    } catch (error) {
+      get().pushToast({
+        title: "Could not choose a file",
+        description: errorMessage(error),
+        variant: "error",
+      });
+    }
+    return id;
+  },
+
+  openConsole: async (sessionId) => {
+    set({ activeSessionId: sessionId });
+    const id = get().newTab({ sessionId });
+    // A console whose database list was never read would show an empty dropdown.
+    if (!get().databasesBySession[sessionId]) await get().loadDatabases(sessionId);
+    return id;
+  },
+
+  saveScript: async (tabId) => {
+    const tab = get().tabs.find((t) => t.id === tabId);
+    if (!tab) return false;
+    let path = tab.filePath;
+    if (!path) {
+      try {
+        path = await pickScriptPath(suggestedScriptName(get(), tabId));
+      } catch (error) {
+        get().pushToast({
+          title: "Could not choose a file",
+          description: errorMessage(error),
+          variant: "error",
+        });
+        return false;
+      }
+      if (!path) return false;
+      get().updateTab(tabId, { filePath: path, title: scriptName(path) });
+    }
+    try {
+      await writeScriptFile(path, tab.sql);
+      get().pushToast({
+        title: "Script saved",
+        description: scriptName(path),
+        variant: "success",
+      });
+      return true;
+    } catch (error) {
+      get().pushToast({
+        title: "Could not save script",
+        description: errorMessage(error),
+        variant: "error",
+      });
+      return false;
+    }
   },
 
   closeTab: (id) => {
@@ -462,7 +554,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     }));
   },
 
-  runTab: async (id) => {
+  runTab: async (id, sqlOverride) => {
     const tab = get().tabs.find((t) => t.id === id);
     if (!tab) return;
     if (!tab.sessionId) {
@@ -473,7 +565,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       });
       return;
     }
-    const sql = tab.sql.trim();
+    const sql = (sqlOverride ?? tab.sql).trim();
     if (!sql) return;
 
     if (get().settings.safety.requireWhereForWrites) {
@@ -562,7 +654,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     }
   },
 
-  explainTab: async (id) => {
+  explainTab: async (id, sqlOverride) => {
     const tab = get().tabs.find((t) => t.id === id);
     if (!tab) return;
     if (!tab.sessionId) {
@@ -573,7 +665,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       });
       return;
     }
-    const sql = tab.sql.trim();
+    const sql = (sqlOverride ?? tab.sql).trim();
     if (!sql) return;
 
     get().updateTab(id, { explaining: true, error: null, plan: null });
@@ -623,6 +715,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       id,
       title: ref.object,
       kind: "object",
+      filePath: null,
       sql: "",
       sessionId: ref.sessionId,
       database: ref.database,

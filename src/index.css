@@ -186,6 +186,12 @@ body {
   outline: none;
 }
 
+/* The statement a Run would execute (see `activeStatementHighlight`). */
+.cm-active-statement {
+  background: color-mix(in oklch, var(--primary) 14%, transparent);
+  box-shadow: -2px 0 0 0 color-mix(in oklch, var(--primary) 55%, transparent);
+}
+
 /* Settings-driven text helpers (see `applyAppearance`). */
 .font-mono-app {
   font-family: var(--app-mono);
