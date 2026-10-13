@@ -69,6 +69,20 @@ test("a session id that is a prefix of another is not over-matched", () => {
   assert.deepEqual(Object.keys(explorerTree.expanded), ["ab||shop||"]);
 });
 
+test("a connection's root row is untouched by the cap and does not consume a slot", () => {
+  resetExplorerTree();
+  // The root key carries no database: it is the explorer's own panel state.
+  explorerTree.expanded["s||"] = false;
+  for (let i = 0; i < MAX_EXPLORER_TREES; i++) {
+    explorerTree.objects[objectKey("s", `db${i}`)] = [];
+    touchExplorerTree("s", `db${i}`);
+  }
+  // A full cap of real trees survived, none of them pushed out by the root.
+  assert.equal(Object.keys(explorerTree.objects).length, MAX_EXPLORER_TREES);
+  assert.notEqual(explorerTree.objects[objectKey("s", "db0")], undefined);
+  assert.equal(explorerTree.expanded["s||"], false);
+});
+
 test("the cache evicts the least-recently-viewed trees past the cap", () => {
   resetExplorerTree();
   const total = MAX_EXPLORER_TREES + 10;

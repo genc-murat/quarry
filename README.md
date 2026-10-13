@@ -380,6 +380,28 @@ the theme choice is stored in `localStorage`.
 
 ![Light mode with the Sunset palette, chosen from the settings panel](docs/screenshots/theme-light.png)
 
+## Connections and the next launch
+
+The connections that are open when the app closes are remembered — as profile ids in the same
+`settings.json` the appearance settings live in, written on every connect and disconnect — and
+reopened on the next launch. A workspace with three servers comes back with three servers: each one a
+root in the explorer, each with its database list already read, and the first tab already pointing at
+the first one. Reopening is deliberately conservative, because it happens before the user has done
+anything: a connection is only reopened when it needs nothing from them, so either its password is
+already stored (`hasPassword`) or the driver's form has no password field at all (a file-backed
+SQLite profile). A server whose password was never saved is left for a manual connect rather than
+failing on every launch, a profile that has since been deleted is dropped, and a server the backend
+still had open is not connected twice. The result is summed up in a single toast (`Reconnected to 3
+servers`), and anything that did fail is reported in one line instead of one toast per server.
+**Settings → General → Reconnect on launch** turns the whole behaviour off.
+
+A connection that was **not** reopened is not hidden either: it stays in the explorer as a dimmed
+root marked `was open`, so the server you had is still one click away. Clicking it reconnects —
+asking for the password only when the profile has none stored, and storing what you type with the
+connection exactly as the connection dialog does, which is what makes the next launch reopen it
+silently. Right-clicking a dimmed root offers **Connect** and **Forget**, and forgetting is
+persistent: that profile is no longer offered or reopened (`connections.open` in `settings.json`).
+
 ## Query workbench
 
 ![The query workbench: the SQL editor, the results grid and the session it runs on](docs/screenshots/query-workbench.png)
@@ -422,6 +444,16 @@ header collapses and expands the group (default: expanded); objects are listed u
 group.
 
 ![The explorer: one database expanded, its objects grouped by kind with row estimates](docs/screenshots/explorer-tree.png)
+
+- Every open connection is its own root node, so connecting to several servers keeps **all** of them
+  (and each one's databases) in the tree at once; browsing another server no longer means switching
+  the active session first. Roots start expanded and each one's database list is read once, and a
+  connection's own objects are read through *its* session, not the active one's. The active
+  connection is marked **active** and the others carry the switch button that makes them the target
+  of new queries and of the table wizard. Each root refreshes **on its own** (the row shows a
+  spinner while its tree is invalidated and its database list re-read), and right-clicking a root
+  offers **Refresh / Make active / Disconnect**, so one server can be re-read or closed without
+  touching the others; the toolbar's **Refresh all connections** does it for every root at once.
 
 - The database list refreshes automatically: when the window comes to the front (focus) and after a
   query that runs `CREATE/DROP DATABASE|SCHEMA`; this way a database opened by another client is

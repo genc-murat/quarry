@@ -21,6 +21,8 @@ test("defaults come from each field default", () => {
   assert.equal(DEFAULT_SETTINGS.editor.timeoutMs, 0);
   assert.equal(DEFAULT_SETTINGS.results.pageSize, 200);
   assert.equal(DEFAULT_SETTINGS.safety.requireWhereForWrites, false);
+  // Reopening the last connections is on unless the user turns it off.
+  assert.equal(DEFAULT_SETTINGS.general.reconnectOnLaunch, true);
 });
 
 test("a non-object blob yields exactly the defaults", () => {

@@ -49,12 +49,18 @@ function dropByPrefix<T>(entries: Record<string, T>, prefix: string): Record<str
   return Object.fromEntries(Object.entries(entries).filter(([key]) => !key.startsWith(prefix)));
 }
 
-/** The `${sessionId}||${database}` a cache key belongs to. */
-function treeOf(key: string): string {
+/**
+ * The `${sessionId}||${database}` a cache key belongs to, or null when the key
+ * is not a database tree at all — a connection's own root row
+ * (`${sessionId}||`) is panel state that sits in `expanded` beside the trees
+ * but neither counts against nor is evicted by the cap.
+ */
+function treeOf(key: string): string | null {
   const first = key.indexOf("||");
-  if (first === -1) return key;
+  if (first === -1) return null;
   const second = key.indexOf("||", first + 2);
-  return second === -1 ? key : key.slice(0, second);
+  if (second === -1) return null;
+  return key.slice(0, second);
 }
 
 /** Forget every cached entry of one tree (all namespaces/groups beneath it). */
@@ -75,7 +81,10 @@ function dropTree(treeKey: string): void {
 export function pruneExplorerTree(): void {
   const inMaps = new Set<string>();
   for (const map of [backing.expanded, backing.namespaces, backing.objects, backing.groupOpen]) {
-    for (const key of Object.keys(map)) inMaps.add(treeOf(key));
+    for (const key of Object.keys(map)) {
+      const tree = treeOf(key);
+      if (tree !== null) inMaps.add(tree);
+    }
   }
   const recencySet = new Set(recency);
   const ordered: string[] = [];

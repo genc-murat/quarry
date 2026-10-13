@@ -226,6 +226,12 @@ export const SETTINGS_REGISTRY = {
     }),
   },
   general: {
+    reconnectOnLaunch: boolField({
+      label: "Reconnect on launch",
+      description:
+        "Reopen the connections that were still open when the app was closed.",
+      default: true,
+    }),
     requireTypedConfirmation: boolField({
       label: "Require typed confirmation",
       description: "Type the object name to confirm destructive drops and truncates.",
@@ -388,6 +394,13 @@ export function applyAppearance(settings: AppSettings): void {
 export interface PersistedSettings {
   theme: { mode: ThemeMode; palette: PaletteId };
   settings: AppSettings;
+  /**
+   * Which connections were open when the workspace was last saved, so the next
+   * launch can reopen them. Profile ids rather than session ids: a session is a
+   * live handle that does not survive the process, a profile is what the user
+   * can be reconnected to.
+   */
+  connections?: { open?: string[] };
   /** Legacy field, only read for migration. */
   maxRows?: number;
 }

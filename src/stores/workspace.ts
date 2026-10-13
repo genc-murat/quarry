@@ -50,6 +50,29 @@ function queryLanguageFor(
 }
 
 /**
+ * Whether a connection can be opened without asking the user anything: its
+ * password is already stored, or the driver's form has no password field at all
+ * (a file-backed SQLite profile, say). A server whose password was never saved
+ * is left for the user to connect by hand, so a launch never fails at something
+ * it cannot fix on its own — and the explorer offers it as a dimmed root
+ * instead, where clicking it asks for the password.
+ */
+export function canConnectWithoutPrompt(
+  profile: ConnectionProfile,
+  drivers: DriverDescriptor[],
+): boolean {
+  if (profile.hasPassword) return true;
+  const fields = drivers.find((driver) => driver.id === profile.driver)?.configFields ?? [];
+  return !fields.some((field) => field.fieldType === "password");
+}
+
+/** `a`, `a, b` or `a, b +2 more` — keeps a launch toast to a single line. */
+function summarizeNames(names: string[], max = 3): string {
+  if (names.length <= max) return names.join(", ");
+  return `${names.slice(0, max).join(", ")} +${names.length - max} more`;
+}
+
+/**
  * One page of a collection or table, as a statement the driver understands.
  * SQL gets a quoted `SELECT *`; MongoDB gets a sorted `find` command, so the
  * page order is stable across `skip` windows.
@@ -163,6 +186,8 @@ interface WorkspaceState {
   profiles: ConnectionProfile[];
   sessions: SessionInfo[];
   activeSessionId: string | null;
+  /** Profiles that were connected when the app was last closed. */
+  rememberedProfileIds: string[];
   databasesBySession: Record<string, DatabaseInfo[]>;
   /** Table/column metadata per `sessionId||database`, used for editor completion. */
   columnsCache: Record<string, TableColumns[]>;
@@ -183,10 +208,20 @@ interface WorkspaceState {
   settings: AppSettings;
 
   bootstrap: () => Promise<void>;
+  /** Reopen the connections remembered from the previous run. */
+  restoreSessions: () => Promise<void>;
   refreshConnections: () => Promise<void>;
   saveConnection: (input: SaveConnectionInput) => Promise<ConnectionProfile | null>;
   deleteConnection: (id: string) => Promise<void>;
   connect: (input: OpenSessionRequest, label?: string) => Promise<SessionInfo | null>;
+  /**
+   * Reopen a remembered connection that is currently closed. A password is only
+   * needed when the profile has none stored; when it is given it is saved with
+   * the profile, which is what lets the next launch reopen it silently.
+   */
+  connectProfile: (profileId: string, password?: string) => Promise<SessionInfo | null>;
+  /** Stop offering a remembered connection: it is not reopened next launch. */
+  forgetProfile: (profileId: string) => void;
   disconnect: (sessionId: string) => Promise<void>;
   setActiveSession: (sessionId: string) => void;
   loadDatabases: (sessionId: string) => Promise<DatabaseInfo[]>;
@@ -245,6 +280,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
   profiles: [],
   sessions: [],
   activeSessionId: null,
+  rememberedProfileIds: [],
   databasesBySession: {},
   columnsCache: {},
 
@@ -286,20 +322,29 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
         settings.editor.maxRows =
           mergeSettings({ editor: { maxRows: stored.maxRows } }).editor.maxRows;
       }
+      // Which connections were open last time. Ids of profiles that no longer
+      // exist are filtered out when they are restored.
+      const remembered = (stored.connections as { open?: unknown } | undefined)?.open;
       set({
         drivers,
         profiles,
         sessions,
         snippets,
         settings,
+        rememberedProfileIds: Array.isArray(remembered)
+          ? remembered.filter((id): id is string => typeof id === "string")
+          : [],
         activeSessionId: get().activeSessionId ?? sessions[0]?.id ?? null,
         booting: false,
       });
+      // Reopen the remembered connections before the first tab exists, so it
+      // lands on a live session instead of an empty one.
+      await get().restoreSessions();
       if (get().tabs.length === 0) {
         get().newTab();
       }
       const active = get().activeSessionId;
-      if (active) {
+      if (active && !get().databasesBySession[active]) {
         await get().loadDatabases(active);
       }
     } catch (error) {
@@ -312,9 +357,104 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     }
   },
 
+  restoreSessions: async () => {
+    const state = get();
+    if (!state.settings.general.reconnectOnLaunch) return;
+    const open = new Set(state.sessions.map((session) => session.profileId));
+    const candidates = state.rememberedProfileIds
+        .map((id) => state.profiles.find((profile) => profile.id === id))
+        .filter((profile): profile is ConnectionProfile => Boolean(profile))
+        .filter(
+          (profile) => !open.has(profile.id) && canConnectWithoutPrompt(profile, state.drivers),
+        );
+    if (candidates.length === 0) return;
+
+    const restored: string[] = [];
+    const failed: string[] = [];
+    for (const profile of candidates) {
+      try {
+        const { session } = await ipc.connect({ profileId: profile.id });
+        set((current) => ({
+          sessions: [...current.sessions.filter((s) => s.id !== session.id), session],
+        }));
+        await get().loadDatabases(session.id);
+        restored.push(session.name);
+      } catch (error) {
+        failed.push(`${profile.name} (${errorMessage(error)})`);
+      }
+    }
+
+    if (restored.length > 0) {
+      // A launch with nothing open lands on the first server that came back; a
+      // workspace that already had a session keeps the one it was on.
+      if (!get().activeSessionId) set({ activeSessionId: get().sessions[0]?.id ?? null });
+      const activeTab = get().tabs.find((tab) => tab.id === get().activeTabId);
+      if (activeTab && !activeTab.sessionId) {
+        get().updateTab(activeTab.id, { sessionId: get().activeSessionId });
+      }
+      get().pushToast({
+        title:
+          restored.length === 1
+            ? `Reconnected to ${restored[0]}`
+            : `Reconnected to ${restored.length} servers`,
+        description: restored.length === 1 ? undefined : summarizeNames(restored),
+        variant: "success",
+      });
+    }
+    if (failed.length > 0) {
+      get().pushToast({
+        title:
+          failed.length === 1
+            ? "Could not restore a connection"
+            : `Could not restore ${failed.length} connections`,
+        // One line: this runs before the user has done anything, so a server
+        // that has gone away must not take over the screen.
+        description: summarizeNames(failed, 2),
+        variant: "error",
+      });
+    }
+  },
+
   refreshConnections: async () => {
     const profiles = await ipc.listConnections();
     set({ profiles });
+  },
+
+  connectProfile: async (profileId, password) => {
+    const profile = get().profiles.find((candidate) => candidate.id === profileId);
+    if (!profile) {
+      get().pushToast({
+        title: "Connection not found",
+        description: "It was removed from the connection list.",
+        variant: "error",
+      });
+      return null;
+    }
+    // A password typed into the explorer's prompt is stored with the connection,
+    // exactly as saving it in the connection dialog would: that is what lets the
+    // next launch reopen this server instead of asking again. Saving goes through
+    // `ipc` directly so the user gets one toast (the connect) rather than two.
+    if (password) {
+      try {
+        await ipc.saveConnection({ ...profile, password });
+        await get().refreshConnections();
+      } catch (error) {
+        get().pushToast({
+          title: "Could not save the password",
+          description: errorMessage(error),
+          variant: "error",
+        });
+        return null;
+      }
+    }
+    return get().connect({ profileId });
+  },
+
+  forgetProfile: (profileId) => {
+    set((state) => ({
+      rememberedProfileIds: state.rememberedProfileIds.filter((id) => id !== profileId),
+    }));
+    get().persistSettings();
   },
 
   saveConnection: async (input) => {
@@ -354,6 +494,12 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
         sessions: [...state.sessions.filter((s) => s.id !== session.id), session],
         activeSessionId: session.id,
         sidebar: "explorer",
+        // Remember it for the next launch. A session opened from a raw config
+        // rather than a profile has nothing to remember.
+        rememberedProfileIds:
+          session.profileId && !state.rememberedProfileIds.includes(session.profileId)
+            ? [...state.rememberedProfileIds, session.profileId]
+            : state.rememberedProfileIds,
       }));
       // Seed the active tab so queries land on the new session.
       const activeTab = get().tabs.find((t) => t.id === get().activeTabId);
@@ -364,6 +510,8 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
         });
       }
       await get().loadDatabases(session.id);
+      // Remember the open connections for the next launch.
+      get().persistSettings();
       get().pushToast({
         title: `Connected to ${session.name}`,
         description: session.server.version ?? undefined,
@@ -385,10 +533,18 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     // Reclaim the explorer tree cached for this session, otherwise a long-lived
     // app keeps trees for every connection it has ever opened.
     dropExplorerSession(sessionId);
+    // Closing a connection stops it being reopened on the next launch too — but
+    // only once no other session still stands for that profile.
+    const closedProfile = get().sessions.find((session) => session.id === sessionId)?.profileId;
     set((state) => {
       const sessions = state.sessions.filter((s) => s.id !== sessionId);
       const databasesBySession = { ...state.databasesBySession };
       delete databasesBySession[sessionId];
+      const stillOpen = sessions.some((session) => session.profileId === closedProfile);
+      const rememberedProfileIds =
+        !closedProfile || stillOpen
+          ? state.rememberedProfileIds
+          : state.rememberedProfileIds.filter((id) => id !== closedProfile);
       // Drop the autocompletion schema too, otherwise a re-connect reusing the
       // key would keep serving the old session's tables.
       const columnsCache = Object.fromEntries(
@@ -398,8 +554,11 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       );
       const activeSessionId =
         state.activeSessionId === sessionId ? (sessions[0]?.id ?? null) : state.activeSessionId;
-      return { sessions, databasesBySession, columnsCache, activeSessionId };
+      return { sessions, databasesBySession, columnsCache, activeSessionId, rememberedProfileIds };
     });
+    // Persist the smaller (or unchanged) set: a closed connection is no longer
+    // offered for the next launch.
+    get().persistSettings();
   },
 
   setActiveSession: (sessionId) => {
@@ -971,6 +1130,10 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       .setSettings({
         theme: { mode: theme.mode, palette: theme.palette },
         settings: get().settings,
+        // The remembered list is the source of truth for what a launch reopens,
+        // so it is what gets stored — sessions come and go within a run, while
+        // this is the set the user expects back next time.
+        connections: { open: get().rememberedProfileIds },
       })
       .catch(() => {
         // Persisting is best effort; the UI keeps working without it.
