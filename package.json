@@ -13,6 +13,7 @@
     "check:version": "node scripts/check-version.mjs",
     "check:release": "node scripts/check-release.mjs",
     "e2e:update": "node scripts/e2e-update.mjs",
+    "smoke:app": "node scripts/smoke-app.mjs",
     "preview": "vite preview",
     "preview:html": "npm run build && node scripts/build-preview.mjs",
     "icon": "node scripts/generate-icon.mjs src-tauri/app-icon.png && tauri icon src-tauri/app-icon.png --output src-tauri/icons",
@@ -21,6 +22,7 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
     "@codemirror/lang-sql": "^6.8.0",
     "@codemirror/language": "^6.12.4",
     "@codemirror/state": "^6.7.6",

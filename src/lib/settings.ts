@@ -246,6 +246,24 @@ export const SETTINGS_REGISTRY = {
       step: 500,
     }),
   },
+  assistant: {
+    smartAutocomplete: boolField({
+      label: "Rank suggestions with a local model",
+      description:
+        "Use a decision model on this machine (Ollama 0.35+) to lift the table you most likely mean to the top of the editor's suggestions, and to mark a statement the model reads as likely to destroy data.",
+      default: false,
+    }),
+    model: selectField({
+      label: "Decision model",
+      description: "The Ollama model used to rank suggestions.",
+      default: "nimble",
+      options: [
+        { value: "nimble", label: "nimble (9B, Bespoke Labs)" },
+        { value: "tev1", label: "tev1 (4B, Together AI)" },
+        { value: "tev1:0.8b", label: "tev1:0.8b (0.8B, Together AI)" },
+      ],
+    }),
+  },
 };
 
 // A separate assignment keeps the registry honest without letting the
@@ -342,6 +360,7 @@ const SECTION_TITLES: Record<SettingsSectionId, string> = {
   results: "Results",
   safety: "Safety",
   general: "General",
+  assistant: "Assistant",
 };
 
 /** The panel renders from this; it is derived from the registry, never hand-kept. */

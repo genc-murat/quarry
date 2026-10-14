@@ -19,6 +19,8 @@ import type {
   OpenSessionRequest,
   QueryRequest,
   QueryResponse,
+  RankCandidatesRequest,
+  RankCandidatesResponse,
   RowChangeRequest,
   SaveConnectionInput,
   SaveSnippetInput,
@@ -136,6 +138,15 @@ export const ipc = {
 
   getSettings: () => call<Record<string, unknown>>("get_settings"),
   setSettings: (value: Record<string, unknown>) => call<void>("set_settings", { value }),
+
+  /**
+   * Ask the local decision model which completion candidate the line being
+   * typed most likely means. Best effort: a model that is not running answers
+   * `available: false` rather than throwing, so the editor keeps its ordinary
+   * order.
+   */
+  rankCandidates: (request: RankCandidatesRequest) =>
+    call<RankCandidatesResponse>("rank_candidates", { request }),
 
   /** Write a SQL script file (desktop; the native picker is `scriptFiles.ts`). */
   writeScriptFile: (path: string, contents: string) =>

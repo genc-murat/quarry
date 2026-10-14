@@ -187,7 +187,8 @@ fn write_transfer(path: &Path, profiles: &[ConnectionProfile]) -> CmdResult<usiz
         }
     }
     let json = to_json(profiles)?;
-    fs::write(path, json).map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    fs::write(path, json)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
     Ok(profiles.len())
 }
 
@@ -313,8 +314,11 @@ mod tests {
 
     #[test]
     fn an_unknown_driver_is_reported_by_name_instead_of_stored() {
-        let json = to_json(&[profile("p1", "Warehouse", "oracle"), profile("p2", "Local", "mysql")])
-            .unwrap();
+        let json = to_json(&[
+            profile("p1", "Warehouse", "oracle"),
+            profile("p2", "Local", "mysql"),
+        ])
+        .unwrap();
         let (added, summary) = merge(&[], from_json(&json).unwrap(), |driver| driver == "mysql");
 
         assert_eq!(summary.imported, 1);
@@ -343,16 +347,22 @@ mod tests {
         let exported = fs::read_to_string(&path).unwrap();
 
         // Neither the password nor the encrypted blob it is stored as.
-        assert!(!exported.contains("hunter2"), "the password travelled:
-{exported}");
+        assert!(
+            !exported.contains("hunter2"),
+            "the password travelled:
+{exported}"
+        );
         let vault = fs::read_to_string(dir.join("secrets.json")).unwrap();
         let blob = serde_json::from_str::<serde_json::Map<String, Value>>(&vault)
             .unwrap()
             .remove("p1")
             .and_then(|value| value.as_str().map(str::to_string))
             .expect("the vault must hold an encrypted password for p1");
-        assert!(!exported.contains(&blob), "the encrypted password travelled:
-{exported}");
+        assert!(
+            !exported.contains(&blob),
+            "the encrypted password travelled:
+{exported}"
+        );
 
         // And what arrives has no password here either.
         let destination = temp_dir("vault-destination");
@@ -377,10 +387,16 @@ mod tests {
         // JSON with no marker at all — or no JSON — is refused as unreadable
         // rather than read as "no connections to import".
         let error = from_json(r#"{"host":"10.0.0.5","port":3306}"#).unwrap_err();
-        assert!(error.starts_with("could not read the connection file"), "{error}");
+        assert!(
+            error.starts_with("could not read the connection file"),
+            "{error}"
+        );
 
         let error = from_json("not json at all").unwrap_err();
-        assert!(error.starts_with("could not read the connection file"), "{error}");
+        assert!(
+            error.starts_with("could not read the connection file"),
+            "{error}"
+        );
     }
 
     #[test]

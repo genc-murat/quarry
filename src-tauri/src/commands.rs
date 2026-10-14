@@ -12,6 +12,7 @@ use serde_json::Value;
 use tauri::State;
 use tokio_util::sync::CancellationToken;
 
+use crate::decision::{RankRequest, RankResponse};
 use crate::drivers::Connection;
 use crate::error::DriverError;
 use crate::models::{
@@ -211,7 +212,11 @@ pub async fn set_session_profile(
     connection_id: String,
     profile_id: String,
 ) -> CmdResult<()> {
-    if !state.sessions.set_profile(&connection_id, &profile_id).await {
+    if !state
+        .sessions
+        .set_profile(&connection_id, &profile_id)
+        .await
+    {
         return Err(DriverError::NotFound(format!("session {connection_id}")).to_string());
     }
     Ok(())
@@ -830,4 +835,19 @@ pub fn get_settings(state: State<'_, AppState>) -> Value {
 #[tauri::command]
 pub fn set_settings(state: State<'_, AppState>, value: Value) -> CmdResult<()> {
     state.settings.set(value).map_err(|e| e.to_string())
+}
+
+/// Rank autocomplete candidates with the local decision model. Best effort by
+/// design: the editor must keep working when Ollama is not running, so a
+/// missing model comes back as `available: false` with a reason rather than an
+/// error the frontend has to catch.
+#[tauri::command]
+pub async fn rank_candidates(
+    state: State<'_, AppState>,
+    request: RankRequest,
+) -> CmdResult<RankResponse> {
+    // The command returns a `Result` because Tauri requires it of an async
+    // command with a borrowed input; an empty ranking is a success, not an
+    // error, so the `Ok` arm carries the outcome either way.
+    Ok(state.decision.rank(&request).await)
 }

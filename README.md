@@ -222,6 +222,264 @@ For Redis, pass `QUARRY_TEST_REDIS_HOST` to the same run (optionally `_PORT`, `_
 `_PASSWORD`). For MongoDB use `QUARRY_TEST_MONGO_HOST`, and for ClickHouse
 `QUARRY_TEST_CLICKHOUSE_HOST` (both also accept optional `_PORT`, `_USER`, `_PASSWORD`).
 
+**What a keystroke costs.** A question to the decision model takes ~450 ms, so the work in
+`src/lib/rankCache.ts` is all about not asking. A question is the line *plus* the list of tables it
+offers, and:
+
+- a repeat is served from memory, and a question already in flight is shared rather than doubled;
+- a line that is merely longer than one already answered over the same tables is answered from
+  that — reuse is refused unless the choices are identical, because the model was measured
+  switching its pick the moment the fragment pointed at a different name;
+- a question waits 150 ms (`SETTLE_MS`) for the writing to stop, and a line that arrives during
+  that wait replaces the one that has not gone out yet and starts the window again.
+
+What a request may contain is bounded on **both** sides, and both bounds are measured rather than
+chosen. The editor trims what it sends: the tail of the line (`MAX_STATE_CHARS`, 2000 characters — a
+minified one-line script can be huge and the model only needs what surrounds the cursor), the head of
+the statement (`MAX_STATEMENT_CHARS`, 4000 — the head is what names the statement's kind and its
+table, which is what that question turns on) and at most a dozen names (`MAX_RANK_CANDIDATES`). The
+client bounds the same fields again (`MAX_*` in `src-tauri/src/decision.rs`) as the last line of
+defence in front of the model: 4 KB of line, 4 KB of statement, 26 names. Deliberately not the same
+numbers, because that side is not enforcing the editor's policy — it bounds the work one keystroke
+can ask of this machine, and a caller that forgot to trim (a bug, or something that is not the
+editor) must not be able to ask for an arbitrarily large prompt. A request that is merely too big is
+truncated rather than refused, which is what the editor does with a long line itself; measured end to
+end, one carrying a 360 KB line, a 400 KB statement and 500 names reaches the endpoint as 4 KB, 4 KB
+and 26 names.
+
+What those bounds cost, and why they are those numbers, is measured against `nimble` on this machine:
+~620 ms for a typical keystroke (a 30-character line, three names), ~3.4 s for the largest request
+the editor itself can send (a 2 KB line, a 4 KB statement, 12 names) and ~5.2 s at the client's bound
+— so the backstop cannot make the machine do much more than the app already asks of it, and it stays
+far from the backend's 20 s budget. The endpoint has walls of its own, both just above the model and
+both found by asking it: more than 26 criteria is refused outright (`HTTP 400 criteria must contain
+2–26 candidates`) and text past 64 KiB is refused as too big (`HTTP 413 text and schema must not
+exceed 64 KiB`). The first is why the candidate bound is 26 and no higher — a bound *above* the
+endpoint's would turn a request that is merely too large into a hard failure ("no model answered"),
+which is the one outcome the bound exists to avoid.
+
+The list itself never waits for the model either. `src/lib/smartComplete.ts` hands back what the
+language's own sources produced straight away, puts the question behind it, and rebuilds the open
+list when the answer lands — as long as the editor is still completing that same place. That second
+pass finds the answer in the cache, so it asks nothing and cannot rebuild a third time; a caller
+that passes no cache has each place rebuilt once and no more.
+
+**The second question rides in the same request.** The editor asks the model two things at once and
+the reply carries both: which table the identifier means (a `choice`), and whether running the
+statement the cursor sits in could permanently remove or overwrite data (a `noul`, a yes/no
+probability). `/v1/systemone` answers a *set* of named questions from one `state` in one round trip,
+so the second one costs a question rather than a call — measured against `nimble`, the ranking alone
+took 257 ms, the pair 437 ms and the same `noul` on its own 251 ms, for three output tokens either
+way. The two halves are read independently, so a model that answers one and not the other still says
+something.
+
+What that answer buys is a warning before Run rather than after: the toolbar marks the statement
+under the cursor when the model reads it as destructive. The wording of the question is what makes it
+work, and it was chosen by measurement rather than guessed. Asked whether a statement merely
+"modifies data", the model scores a bounded `UPDATE ... WHERE id = 1` at ~1.0 exactly as it scores
+`DROP TABLE`, which is useless as a warning; asked about *permanently removing or overwriting what is
+already there*, it separates them — ~0.005 for `SELECT`, `INSERT`, `CREATE INDEX` and
+`ALTER TABLE ... ADD COLUMN`, ~0.999 for `DELETE`, `DROP` and `TRUNCATE`, and 0.31 for that bounded
+single-row update, i.e. on the safe side of a threshold sitting between the two ends
+(`DESTRUCTIVE_THRESHOLD` in `src/lib/statementRisk.ts`, which is where the client's probability is
+turned into a warning; the client itself holds no opinion about it).
+
+A reading belongs to the exact statement it was asked about and to nothing else. `src/lib/rankCache.ts`
+reports which statement an answer actually came from, so the badge never names a statement the model
+never saw and `DELETE FROM orders` never lends its reading to `DELETE FROM orders WHERE id = 1`; the
+two are different statements, and a bounded `DELETE` is still destructive (measured at 0.9992, so the
+warning stands) while a bounded `UPDATE` is not (0.31). When no ranking request has carried the statement (the cursor resting in one
+pasted in, for instance), the editor asks about that statement on its own after the same settle
+window. It is on the same switch as ranking and equally best-effort: a model that is missing, slow or
+unsure costs the ranking, the badge and nothing else.
+
+**A statement that failed is a question of its own.** The decision layer carries a third question
+beside those two, and it is the only one whose subject is not the line being typed: a command came
+back with an error, and the model is asked which of the schema's names the SQL that did not run most
+likely meant. The request therefore carries both halves of the failure — the failing SQL in its own
+state block and the database's own error in another — and the wording names the block the SQL is in,
+because the model has to tell the statement apart from the error beside it. A repair question with
+only one of the two is not a question: it is answered the way a missing model is, with no call made.
+
+The names to choose between are the schema's, plus one criterion that is not a name at all —
+`none of the listed names is the one it meant` — so declining is an answer the question can be given.
+That criterion counts like any other to the endpoint, which refuses more than 26 of them (measured
+above), so a repair request carries one name fewer than a ranking one. A model that names it is not
+producing a ranking: the client turns that into an empty one and passes the reason on in its own
+words (`no listed name fits the error`), because a suggestion that picked a name when the schema had
+none would send the reader to a name their SQL never meant.
+
+Measured against `nimble` on this machine over seven failures — a mistyped column, a mistyped table
+and a mistyped schema-qualified table across SQLite, MySQL and PostgreSQL, plus two failures nothing
+in the schema fits — the model named the intended name in six of them, at 0.94 to 0.99, and on
+`no such column: profit_margin_eur` against a schema holding none of those words it chose the
+criteria's own decline (0.941). The one it missed is worth keeping: `SELECT * FROM order_number` — a
+column name in a table position — came back `orders`, which is a repair a person might well make, and
+which the decline criterion does not cover. What the feature needs is that the confident answers are
+right and that a schema with nothing close produces nothing, and that is what this run shows; one
+answer is one answer, and the wording is `REPAIR_INSTRUCTION` in `src-tauri/src/decision.rs`, asked as
+`CandidateKind::Repair`, where the numbers are recorded beside it.
+
+**What the editor asks it about is decided on this side.** A schema can hold hundreds of names and one
+repair request may carry 25 of them, so `src/lib/statementRepair.ts` builds a shortlist before anything
+is sent — and the shortlist is the design. Names are scored against the identifiers the *error* itself
+names (`ordred_at`, `quanity`, `oder_number`, `shop.ordres`), because that is where the typo is in every
+dialect's wording, and only those within `REPAIR_SIMILARITY` are offered: the measured mistakes sit at
+0.67 and above, a column name used where a table belongs is a partial match on its prefix (0.42), and a
+name the error is not about falls below the floor — `no such column: profit_margin_eur` scores 0.24
+against the closest name in the demo schema, so that failure is never put to the model at all. Not
+asking is cheaper than a declination and at least as honest, and it is what makes the hint something a
+reader can act on rather than a guess with a model's name on it.
+
+The SQL is deliberately *not* scored, though it is what the model is shown. Its names are valid names
+by definition, so each would match itself at 1.0 and drown out the typo the question exists for —
+`SELECT * FROM orders WHERE profit_margin_eur = 1` would offer `orders` as a perfect candidate for a
+failure in another name entirely. A shortlist of one name is still asked about, because the question
+carries its own "none of these" criterion and can always be declined; a shortlist of none is not a
+question.
+
+A failure is an event rather than a position, so it does not wait for a keystroke to settle: the run's
+failed statements are read once from its results, asked about once, and the answer is filed under the
+statement *and* the error it was given for — the same statement failing two ways is two questions, and
+a declination is an answer that is not asked again. The hint itself is drawn under the database's own
+error, not instead of it, and only when the layer below actually ranked the answer: a declination and an
+unsure answer both arrive with an empty `ranked` while still filling in `choice`, so `choice` alone is
+not a suggestion and is never shown as one. It is on the same switch as the ranking, and it is
+best-effort in the same way — a model that is missing, slow or sure of nothing costs the hint and
+nothing else.
+
+**And the hint can be pressed.** A suggestion a reader has to retype by hand is half a feature, so the
+name is offered with a **Fix and run** button that writes it into the statement in the editor and runs
+it. Which word the answer is about is a fact about the text rather than about the model, so it is
+recomputed here (`repairTarget`): the word has to be one the *error named* — a suggested name that
+merely happens to be close to some other word in the statement is a coincidence, not a repair — it has
+to be *in the statement*, and it has to be close to the suggested name under the same floor the
+shortlist was built with. Every whole-word occurrence is replaced, because a typo is a typo wherever it
+appears: a `SELECT` list and its `WHERE` clause usually spell the same mistake twice, and mending one of
+them would leave the statement failing for the same reason. Nothing else in the text is touched, so a
+repair can only ever change the name that was got wrong — quoting is the writer's, and only the word
+inside the quotes is replaced.
+
+The button only appears while the statement it would mend is still in the editor; the SQL having been
+edited since the failure means there is nothing to put right, and a control that changed nothing would
+be worse than no control. What it does is said in its tooltip before it is pressed, because a button
+that rewrites the editor and runs it should not have to be discovered. Nothing is remembered as
+"fixed": a repair that fails anyway is a new failure with its own error, and it is asked about like
+any other.
+
+**A dotted completion asks about columns.** A bare identifier asks which *table* is meant; one after
+a qualifier — `orders.ord` — asks which of that table's *columns*. Nothing downstream of the
+candidates changes: the same cache, the same boosts by label, the same "the list is shown first and
+reordered when the answer lands". Only the question's wording changes, and it travels as `kind` so
+the model is told what it is choosing between (`the order_number column`, not `the order_number
+table`).
+
+What the language actually offers behind a qualifier was measured against `@codemirror/lang-sql`
+rather than assumed, because it decides which of these can work at all: `orders.` offers that table's
+columns, `shop.ord` offers that schema's tables (so the question stays a table question there, and
+only the tables on screen are asked about — `order_archive` in another schema is not), `shop.orders.ord`
+resolves like the first case because the identifier next to the dot is the table's, and an **alias**
+— `o.` in `FROM orders o` — offers the bare list instead. The language does not resolve aliases, so
+`orders`' columns are not behind `o.` at all; offering them would mean adding names it never offered,
+which is a different feature from ranking the ones it did. `o.ord` is therefore completed exactly as
+it was before.
+
+How a qualifier may be **spelled** was measured the same way, because a spelling the editor did not
+recognise would drop the ranking silently rather than fail: a double-quoted identifier is the same
+qualifier — `"orders".` offers exactly the columns `orders.` offers — so the quotes are taken off and
+the name is read, which is what `"shop"."orders".ord` needs too. Backticks and brackets are *not*
+treated as one, because the language does not resolve them either: `` `orders`. `` offers the bare
+list rather than that table's columns. The language matches a name **exactly**, case included —
+`ORDERS.` and `"ORDERS".` offer nothing at all, and `"orders".` offers nothing when the schema
+spells the table `Orders`. This editor is deliberately more forgiving than that, since SQL names are
+case-insensitive on most engines, but a question is only worth asking about names the list is
+actually showing: one whose candidates are all absent from it is not sent, so an uppercased qualifier
+costs no model call and a quoted one is ranked like any other. The same rule catches the documents the
+language's own parser has not caught up with — a 3.6 KB one-line select list of a thousand names
+offers the keyword list and no tables at all — where there was nothing to reorder either.
+
+How good the column answers are is measured too, and they are **weaker than the table question**:
+the model does read the statement (`SELECT date_trunc('day', o.ord)` over `order_number < ordered_at <
+order_status` answers `ordered_at`, 0.835, and the live test above prints what it answers for a
+`WHERE` clause — 0.489 for `order_number` on a line that also names `order_status`), but three
+wordings of the question all named `order_number` for `SELECT * FROM orders o ORDER BY o.ord`, the
+same case answered between 0.03 and 0.20 as the state around it changed, and a column the statement
+does not point at is sometimes named. The cost of a wrong pick is bounded by design — names are only
+ever *reordered*, never added or removed, so a wrong one costs the reader a row — and an answer the
+model is not sure enough about (`MIN_CONFIDENCE`, 0.15 in `src-tauri/src/decision.rs`) is not acted
+on at all.
+
+**A list that keeps its own order says which question it was asked.** Because an unsure column
+answer is the ordinary case behind a qualifier rather than a fault, the toolbar's pill separates the
+two ways a list can end up unranked: it reads `AI unavailable` when no model answered at all ("is
+Ollama running?") and `AI unsure` when an answer arrived without enough conviction — and in that
+second case its tooltip names what was being chosen between ("which column you meant", not "which
+table") and quotes the client's own reason verbatim, number included ("the model was not sure enough
+(0.32 below 0.15)"). Without it, a reader is left to guess between a broken assistant and a question
+the model finds hard. The states and every sentence they show live in `src/lib/assistantStatus.ts`;
+the workspace supplies the facts and the pill only draws them.
+
+Measured against `nimble`, the endpoint's own cache helps only for a request it has answered byte
+for byte — an identical body returns in ~52 ms, while any change, one character of the line
+included, costs the full prompt again (~450 ms). Serializing the volatile field before or after
+the questions makes no difference (measured both ways), so the only lever is not sending the
+request at all. Against a model that takes 200 ms to answer, six keystrokes of one word become one
+question when they are typed without pausing; when the choices narrow partway through, one question
+per set of choices — a genuinely different question, which is why the cache keys on the choices.
+
+Reuse across a longer line rests on the model keeping its answer while the choices are unchanged,
+which the live test below checks at every step of `orders` rather than assuming.
+
+Smart autocomplete's model is verified the same way. With Ollama running and a decision model
+pulled, this test ranks real candidates over the real endpoint and prints the latency, which is
+the only place it is measured (the four- and twelve-candidate timings, and what typing costs as
+opposed to repeating one line, all come from here):
+
+```bash
+QUARRY_TEST_OLLAMA=1 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture ranks_with_a_real_model
+```
+
+`QUARRY_TEST_OLLAMA_MODEL` picks the model (default `nimble`) and `QUARRY_OLLAMA_URL` the origin.
+The client's budget is sized for a model that is not resident yet: Ollama drops one from memory after
+a few idle minutes, and `nimble` took 7.25 s to come back, so the first question of a session is
+answered rather than dropped. Nothing on screen waits for that answer — the suggestions are already
+showing — which is what lets the budget be generous. The test prints the first call's latency and
+reports any attempt that still missed.
+
+Where that test asks the client, `npm run smoke:app` asks the **app**: it builds a bundle that carries
+a probe (`src/lib/rankProbe.ts`, the arrangement `scripts/e2e-update.mjs` uses to press Install),
+launches it on a generated SQLite demo, and has the app itself type the last character of
+`SELECT * FROM ord` into the workspace's editor. The probe reports what the editor did with that
+keystroke and the script judges the **sequence**: in the debug run above, the list opened unranked at
+162 ms (`order_archive > order_items > orders`), the model answered at 713 ms, and the rebuilt list
+read `orders` first at 772 ms (180 ms, 410 ms and 471 ms for the same run in the release profile). A list that already led with the table the model would pick, a ranking
+that never arrived, and a list that never opened are three different failures with three different
+messages — the run reports the editor's own completion state alongside the list on screen, so a
+failure says why rather than merely that nothing happened.
+
+The same run then carries a **failure phase**, because what the editor does with a statement the
+database rejected is decided by an effect, a store and a request that no test outside the app can
+see end to end: the probe runs `SELECT * FROM oder_items` once the ranking has been seen, reports the
+error SQLite gave back and then the name the editor drew under it. What the script asserts is again a
+steps of a sequence — a `failed:` step, a `repair:` step naming the real table, and then the button
+pressed: a `fixed:` step holding the statement the editor was left with and a `ran:` step from running
+it. So a hint that never appeared (the probe gives up with `timeout:no-repair`), a hint naming
+something else, a repair never written and a repair written but not run are four faults with four
+messages, and none of them can pass on the strength of the ranking alone. In the debug run above the
+error was on screen at 5489 ms (`no such table: oder_items`), the suggestion — `order_items`, 95%
+sure — at 6284 ms, and the editor was left holding `SELECT * FROM order_items` and had run it by
+6328 ms.
+
+The typing has to be real because nothing else can stand in for it; everything around it is checked
+instead of assumed. The demo schema is built for the question — every table contains `ord`, and the
+SQL names the one the language would list *last* — so a reordering is visible as a reordering rather
+than as agreement. The failure phase's SQL is a mistyped `order_items`, which is the mistake the
+repair question was measured on. Needs Ollama with a decision model pulled (`QUARRY_SMOKE_MODEL`,
+default `nimble`); without one the run exits 2 before building. `-- --release` drives the profile a shipped
+bundle is built in, which is slower but is the bundle that ships. A probe build is not a build to
+keep — both the probe and the widened CSP are build-time choices — so the run puts back whatever
+bundle it found in the target directory before it exits.
+
 ## MySQL 5.6 notes
 
 - **TLS**: versions before 5.6.46 do not support TLS 1.2. Set the **TLS** field in the connection
@@ -451,7 +709,24 @@ remembered list is not read on the way in, so nothing about the last session is 
   will run is highlighted in the editor. `Script` (or `⌘/Ctrl + Alt + Enter`) runs the whole script.
   A script is split by a quote/comment-aware scanner kept in step with the one the backend runs the
   script with (`src/lib/sqlScript.ts` ↔ `src-tauri/src/sql_split.rs`), so a `;` inside a string,
-  comment or `BEGIN … END` body never ends a statement.
+  comment or `BEGIN … END` body never ends a statement. That scanner runs on **every keystroke**, and
+  twice: the active-statement highlight rescans on each change and the completion source asks for the
+  cursor's statement as well. It therefore walks the script by character code — allocating no
+  one-character strings and reading a statement's words only while they can still change anything
+  (any statement whose first word is not `CREATE` is settled immediately) — which measured
+  0.10 ms at 20 KB, 0.8 ms at 200 KB, 3.3 ms at 1 MB and 11 ms at 4 MB, against 0.43 / 4.7 / 22 / 94 ms
+  for the byte-at-a-time version before it. The old implementation is kept in
+  `src/lib/sqlScriptLegacy.test.ts` as the reference the fast one is checked against, case by case and
+  on generated documents, because "the scanner got faster" and "the scanner got different" are
+  otherwise indistinguishable.
+- **A statement that failed is read too** — the database's own error is put to the local model along
+  with the SQL that produced it, and the name the model thinks the statement meant is drawn *under*
+  the error ("Did you mean `ordered_at`?") rather than instead of it, with a **Fix and run** button
+  that writes the name into the statement and runs it. A failure nothing in the schema is close to
+  costs no request at all, and a declination or an unsure answer shows nothing, so the line only ever
+  appears when there is something to act on (`src/lib/statementRepair.ts`). It is on the assistant
+  switch, and as best-effort as the ranking: a model that is missing or slow costs the hint and
+  nothing else.
 - **Run / Stop** — a long-running query is stopped with the `Stop` button (or `⌘/Ctrl + .`).
   Both SQL drivers return `supportsCancel: true`: the server-side identity of the running connection
   is obtained (`SELECT CONNECTION_ID()` / `pg_backend_pid()`) and the cancel is issued from a
@@ -881,6 +1156,7 @@ certificate to that workflow's `env` is all the packaging side needs.
 | `npm run check:drift` | Runs the drift check with both halves: Rust registry ↔ `src/lib/fixtures/driver-descriptors.json` ↔ `src/lib/mockFixtures.ts` (capabilities, fields + quote character and the `EXPLAIN` reply) |
 | `npm run check:version` | Verifies that `package.json`, `src-tauri/Cargo.toml` and `src-tauri/tauri.conf.json` declare the same version; with an argument (`npm run check:version -- v0.2.0`) it also checks the release tag |
 | `npm run e2e:update` | Builds two real bundles and has the older app update itself from a local server, then repeats that with a tampered artifact and with a signature from a foreign key, both of which must be refused (`scripts/e2e-update.mjs`, contracts in `scripts/updatePlatforms.mjs`; `--report` prints what each platform's path consists of). Needs a GUI session and the updater signing key; two debug builds make it too slow for CI |
+| `npm run smoke:app` | Builds a probe-carrying bundle and drives the real app with nobody watching: it connects to a generated SQLite demo, types `SELECT * FROM ord`'s last character into the editor, and asserts that the completion list opened unranked and then led with the model's pick — and then runs a statement the demo database rejects, asserting that the error is on screen and that the editor suggested the table the SQL meant (`scripts/smoke-app.mjs`, probe in `src/lib/rankProbe.ts`; `-- --release` for the shipped profile). Needs Ollama with a decision model pulled, and a GUI session; a probe build is put back the way it was found when the run ends |
 | `npm run icon` | Renders the icon (`scripts/generate-icon.mjs`) and produces all platform sizes (`icns`, `ico`, Android/iOS) |
 | `npm run preview:html` | Bundles the app as a single-file `preview.html` (for inspecting in a browser) |
 | `node scripts/build-icon-sheet.mjs` | Produces `icon-sheet.html` showing the icon at 512/256/128/64/32 px on light and dark backgrounds |

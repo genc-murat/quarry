@@ -18,6 +18,8 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
+import { StatementRepairHint } from "@/components/query/StatementRepairHint";
+import type { FailureRepair } from "@/lib/statementRepair";
 import { ContextMenu, type MenuEntry } from "@/components/ui/context-menu";
 import { downloadText, serializeExport } from "@/lib/objects";
 import { buildRowChanges, type CellEdit, type EditSource } from "@/lib/rowEdit";
@@ -54,6 +56,14 @@ interface Props {
   /** Pagination window for a table preview. */
   preview?: { limit: number; offset: number } | null;
   onPage?: (offset: number) => void;
+  /**
+   * What the local model suggested for a statement that failed — and how to act
+   * on it, when the statement can still be put right in the editor. A lookup rather
+   * than a value because the grid, not the workspace, knows which statement of a
+   * multi-statement run is on screen, and the suggestion belongs to exactly the
+   * statement and error it was asked about.
+   */
+  repairFor?: (statement: string, error: string) => FailureRepair | null;
 }
 
 export function ResultsGrid({
@@ -65,6 +75,7 @@ export function ResultsGrid({
   onSaveChanges,
   preview = null,
   onPage,
+  repairFor,
 }: Props) {
   const [activeIndex, setActiveIndex] = useState(0);
   const [cellMenu, setCellMenu] = useState<{ x: number; y: number; row: unknown[]; value: unknown } | null>(
@@ -106,6 +117,15 @@ export function ResultsGrid({
   const statements = result?.results ?? [];
   const statement: StatementResult | null =
     statements.length > 0 ? (statements[Math.min(activeIndex, statements.length - 1)] ?? null) : null;
+
+  // The failure the banner is about, and what the workspace has to say about it:
+  // the suggestion, and whether the statement can still be put right. Both come
+  // from the workspace, which is the only thing that knows what the editor holds.
+  const failure =
+    statement && statement.error
+      ? { statement: statement.statement, error: statement.error }
+      : null;
+  const repair = failure ? (repairFor?.(failure.statement, failure.error) ?? null) : null;
 
   const columnNames = useMemo(() => statement?.columns.map((column) => column.name) ?? [], [statement]);
   const source = editSource;
@@ -401,10 +421,16 @@ export function ResultsGrid({
         </div>
       ) : null}
 
-      {statement?.error ? (
-        <pre className="max-h-32 overflow-auto border-b border-border bg-destructive/5 px-3 py-2 font-mono text-[11px] text-destructive">
-          {statement.error}
-        </pre>
+      {failure ? (
+        <div className="border-b border-border bg-destructive/5">
+          <pre className="max-h-32 overflow-auto px-3 py-2 font-mono text-[11px] text-destructive">
+            {failure.error}
+          </pre>
+          {/* Below the error, because the error is what happened and this is only
+              what the model made of it — and the fix, when the statement in the
+              editor is still the one that failed. */}
+          <StatementRepairHint repair={repair?.repair ?? null} onFix={repair?.fix ?? null} />
+        </div>
       ) : null}
 
       <ResultBody

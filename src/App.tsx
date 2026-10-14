@@ -14,6 +14,7 @@ import { SettingsPanel } from "@/components/settings/SettingsPanel";
 import { SchemaToolsPanel } from "@/components/schema/SchemaToolsPanel";
 import { SnippetPanel } from "@/components/snippets/SnippetPanel";
 import { Toaster } from "@/components/ui/toaster";
+import { startRankProbe } from "@/lib/rankProbe";
 import { applyAppearance } from "@/lib/settings";
 import { applyTheme, useThemeStore } from "@/stores/theme";
 import { useWorkspace } from "@/stores/workspace";
@@ -27,6 +28,8 @@ export default function App() {
 
   useEffect(() => {
     void bootstrap();
+    // Inert unless the build asked for it; see src/lib/rankProbe.ts.
+    startRankProbe();
   }, [bootstrap]);
 
   useEffect(() => {

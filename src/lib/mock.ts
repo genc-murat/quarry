@@ -24,6 +24,7 @@ import type {
   ObjectSectionRequest,
   QueryRequest,
   QueryResponse,
+  RankCandidatesResponse,
   RowChangeRequest,
   ServerInfo,
   SessionInfo,
@@ -544,6 +545,20 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
     }
     case "get_settings":
       return respond(SETTINGS);
+    // The browser has no local model to ask. Ranking is a desktop assist, so
+    // the demo answers as an app without Ollama would: no opinion, and the
+    // editor keeps its ordinary order.
+    case "rank_candidates":
+      return respond({
+        ranked: [],
+        choice: null,
+        confidence: 0,
+        available: false,
+        reason: "no local model in the browser demo",
+        // Nothing was read either: the browser has no model to read it with, and a
+        // reading is never invented.
+        readings: [],
+      } satisfies RankCandidatesResponse);
     // The browser has no disk: `scriptFiles.ts` downloads instead of calling
     // this, so the reply only keeps the command set total.
     case "write_script_file":

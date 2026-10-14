@@ -6,6 +6,7 @@
 
 mod commands;
 mod ddl;
+mod decision;
 mod drivers;
 mod error;
 mod models;
@@ -25,6 +26,7 @@ use std::sync::Arc;
 use tauri::Manager;
 use tracing_subscriber::EnvFilter;
 
+use decision::DecisionClient;
 use drivers::DriverRegistry;
 use secrets::SecretStore;
 use session::{QueryRegistry, SessionManager};
@@ -40,6 +42,8 @@ pub struct AppState {
     pub snippets: Arc<SnippetStore>,
     /// In-flight query runs, cancellable by id.
     pub running: Arc<QueryRegistry>,
+    /// Local decision model used to rank editor completion candidates.
+    pub decision: Arc<DecisionClient>,
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -75,6 +79,7 @@ pub fn run() {
                 secrets: Arc::new(SecretStore::load(&config_dir)),
                 snippets: Arc::new(SnippetStore::load(&config_dir)),
                 running: Arc::new(QueryRegistry::new()),
+                decision: Arc::new(DecisionClient::new()),
             });
             Ok(())
         })
@@ -111,6 +116,7 @@ pub fn run() {
             commands::delete_snippet,
             commands::get_settings,
             commands::set_settings,
+            commands::rank_candidates,
             scripts::write_script_file,
         ])
         .run(tauri::generate_context!())

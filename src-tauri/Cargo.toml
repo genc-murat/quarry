@@ -49,6 +49,9 @@ clickhouse = { version = "0.13", default-features = false, features = [
   "rustls-tls-ring",
   "rustls-tls-native-roots",
 ] }
+# Talks to a local decision model (Ollama's `/v1/systemone`) over plain HTTP on
+# loopback, so no TLS feature is needed; see `src/decision.rs`.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
 
 # Update delivery is a desktop concern: the updater reads a release manifest and
 # the process plugin restarts the app into the version it just installed.

@@ -28,6 +28,9 @@ const DOM_GLOBALS = [
   "localStorage",
   "sessionStorage",
   "HTMLElement",
+  // CodeMirror's view measures with `elt instanceof Window`, so the constructor
+  // has to be reachable as a global or a scroll measurement throws mid-frame.
+  "Window",
   "HTMLInputElement",
   "HTMLSelectElement",
   "Element",

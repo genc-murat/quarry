@@ -124,6 +124,110 @@ export interface ConnectResult {
   session: SessionInfo;
 }
 
+/**
+ * What a request's candidates are. It picks the wording of the question the
+ * model is asked — nothing else about the answer's shape changes.
+ *
+ * `repair` is the odd one out: its question is about a failure rather than about
+ * a line being typed, it is the only one that carries an `error`, and it is the
+ * only one whose answer may be "none of these" (an empty `ranked`, with the
+ * client's own reason beside it).
+ */
+export type RankCandidateKind = "table" | "column" | "repair";
+
+/**
+ * How far running a statement could go, as the model's scale is stepped.
+ *
+ * The steps are ordered, and the words behind them — the scale the model was
+ * asked to place the statement on — are defined and measured in
+ * `src-tauri/src/decision.rs`. The client reports which step the answer landed
+ * on and where on the scale it landed; which steps are worth a mark is the
+ * editor's policy, and it lives in `src/lib/statementRisk.ts`.
+ */
+export type RiskVerdict = "safe" | "bounded" | "rows" | "structure";
+
+/** What the model read about one statement, as the client reports it. */
+export interface StatementReading {
+  /** The statement as it was sent, which is the only text it describes. */
+  statement: string;
+  verdict: RiskVerdict;
+  /** Where on the scale the model put it, in steps: 0 is the first step. */
+  level: number;
+  /** How sure the model was of that position, 0..1. */
+  confidence: number;
+}
+
+/** What the editor sends to the local decision model to rank its suggestions. */
+export interface RankCandidatesRequest {
+  /** The line being typed; the block the ranking question is asked about. */
+  state: string;
+  /** Names the identifier could still complete to. Fewer than two is no question
+   *  at all — unless `statements` is sent, which is a question of its own. */
+  candidates: string[];
+  model: string;
+  /** What the candidates are: table names at a `FROM` position, column names
+   *  after a qualifier. Omitted means tables. */
+  kind?: RankCandidateKind;
+  /**
+   * The statements a command would send, in the order it would send them: the
+   * statement under the cursor, the statements of a selection, or a script's.
+   * Each adds a risk question to this same request, so a reading costs a
+   * question rather than a call.
+   */
+  statements?: string[];
+  /**
+   * The database's own error for a statement that failed. It is the subject of
+   * the `repair` question — which name the SQL most likely meant — and nothing
+   * else reads it. A repair question needs both halves of a failure: this one and
+   * the statement in `statements`.
+   */
+  error?: string | null;
+}
+
+/**
+ * The model's ranking. `available` is false when no model answered (not
+ * installed, not running, too slow); `ranked` is then empty and the caller
+ * keeps its ordinary order.
+ */
+export interface RankCandidatesResponse {
+  ranked: string[];
+  choice: string | null;
+  confidence: number;
+  /** True when the *ranking* question was answered, which is a different fact
+   *  from any of the risk ones, and from a model that said nothing at all. */
+  available: boolean;
+  reason: string | null;
+  /**
+   * One reading per statement the model answered about, each echoing the
+   * statement as it was sent. Empty when no statement was sent, and when no
+   * question was answered: a statement with no reading has none, which is what
+   * keeps a silent model from reading as "safe".
+   */
+  readings: StatementReading[];
+}
+
+/**
+ * What the local model suggested for a statement that did not run.
+ *
+ * `name` is null whenever there is no suggestion to make — the model declined,
+ * was not sure enough, or no model answered at all — and `reason` is what tells
+ * those apart, in the client's own words (`src-tauri/src/decision.rs`). Nothing
+ * here is a claim about the SQL: it is what the model said when it was shown the
+ * failure and the schema's names, and nothing else.
+ */
+export interface StatementRepair {
+  /** The statement as it was sent, which is the only text it describes. */
+  statement: string;
+  /** The database's own error it was asked about. */
+  error: string;
+  /** The name the SQL most likely meant, or null when there is none to offer. */
+  name: string | null;
+  /** How sure the model was of that name, 0..1. */
+  confidence: number;
+  /** Why there is no suggestion, when the layer below gave a reason. */
+  reason: string | null;
+}
+
 export interface DatabaseInfo {
   name: string;
   isSystem: boolean;

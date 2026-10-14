@@ -128,7 +128,7 @@ test("writeSetting is immutable", () => {
 test("the panel schema is derived from the registry", () => {
   assert.deepEqual(
     SETTINGS_SECTIONS.map((section) => section.id),
-    ["appearance", "editor", "results", "safety", "general"],
+    ["appearance", "editor", "results", "safety", "general", "assistant"],
   );
   for (const section of SETTINGS_SECTIONS) {
     assert.ok(section.title.length > 0, `${section.id} has no title`);
