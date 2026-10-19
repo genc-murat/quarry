@@ -265,33 +265,52 @@ pass finds the answer in the cache, so it asks nothing and cannot rebuild a thir
 that passes no cache has each place rebuilt once and no more.
 
 **The second question rides in the same request.** The editor asks the model two things at once and
-the reply carries both: which table the identifier means (a `choice`), and whether running the
-statement the cursor sits in could permanently remove or overwrite data (a `noul`, a yes/no
-probability). `/v1/systemone` answers a *set* of named questions from one `state` in one round trip,
-so the second one costs a question rather than a call — measured against `nimble`, the ranking alone
-took 257 ms, the pair 437 ms and the same `noul` on its own 251 ms, for three output tokens either
-way. The two halves are read independently, so a model that answers one and not the other still says
-something.
+the reply carries both: which table the identifier means (a `choice`), and how far running each
+statement a command would send could go — one graded question per statement, answered as a position
+on a four-step scale (a `score`). `/v1/systemone` answers a *set* of named questions from one
+`state` in one round trip, so a reading costs a question rather than a call — measured against
+`nimble`, the ranking alone took 257 ms and the pair 437 ms. The halves are read independently, so
+a model that answers one and not the other still says something, and each reading is filed under
+the statement it was asked about.
 
-What that answer buys is a warning before Run rather than after: the toolbar marks the statement
-under the cursor when the model reads it as destructive. The wording of the question is what makes it
-work, and it was chosen by measurement rather than guessed. Asked whether a statement merely
-"modifies data", the model scores a bounded `UPDATE ... WHERE id = 1` at ~1.0 exactly as it scores
-`DROP TABLE`, which is useless as a warning; asked about *permanently removing or overwriting what is
-already there*, it separates them — ~0.005 for `SELECT`, `INSERT`, `CREATE INDEX` and
-`ALTER TABLE ... ADD COLUMN`, ~0.999 for `DELETE`, `DROP` and `TRUNCATE`, and 0.31 for that bounded
-single-row update, i.e. on the safe side of a threshold sitting between the two ends
-(`DESTRUCTIVE_THRESHOLD` in `src/lib/statementRisk.ts`, which is where the client's probability is
-turned into a warning; the client itself holds no opinion about it).
+The scale and the wording of the question were both chosen by measurement, because a real model
+answers the literal reading of a question. Asked whether a statement merely "modifies data", it
+scores a bounded `UPDATE ... WHERE id = 1` at ~1.0 exactly as it scores `DROP TABLE`, which is
+useless as a warning; the scale it was finally given answers by *kind* — reads and changes nothing,
+writes a bounded number of rows, removes every row, removes a table — and over nine statements the
+answers came back ordered the way the steps are: `SELECT ... WHERE id = 1` 0.01, `CREATE INDEX`
+0.11, `ALTER TABLE ... ADD COLUMN` 0.73, a bounded `UPDATE` 1.00, `INSERT` 1.01, a one-row
+`DELETE` 1.05, `DELETE FROM orders` 1.87, `TRUNCATE` 1.98, `DROP TABLE` 3.00 (`RISK_SCALE` in
+`src-tauri/src/decision.rs`, where the numbers are recorded). The position is rounded to the
+nearest step — ties to the lower one — and that step is the `verdict` the client reports. Which
+steps are worth a warning is the editor's policy (`src/lib/statementRisk.ts`): the two that take
+something away are marked, in the words "Removes every row" and "Removes a table", and a bounded
+write is deliberately silent — measured, a one-row `DELETE` and a bounded `UPDATE` sit on the same
+step, and an ordinary edit is not what a warning is for.
 
-A reading belongs to the exact statement it was asked about and to nothing else. `src/lib/rankCache.ts`
-reports which statement an answer actually came from, so the badge never names a statement the model
-never saw and `DELETE FROM orders` never lends its reading to `DELETE FROM orders WHERE id = 1`; the
-two are different statements, and a bounded `DELETE` is still destructive (measured at 0.9992, so the
-warning stands) while a bounded `UPDATE` is not (0.31). When no ranking request has carried the statement (the cursor resting in one
-pasted in, for instance), the editor asks about that statement on its own after the same settle
-window. It is on the same switch as ranking and equally best-effort: a model that is missing, slow or
-unsure costs the ranking, the badge and nothing else.
+What that buys is a warning before Run rather than after, and about the statements a command would
+*send*: the selection when there is one — a selection can hold several statements, and Run sends
+all of them — otherwise the statement under the cursor, resolved through the same function the
+button resolves its text with, so the question cannot drift from the run; and the Script button's
+mark is about the whole file, whose readings fill in a dozen statements per settle. A reading
+belongs to the exact statement it was asked about and to nothing else — each one echoes the
+statement as it was sent — so `DELETE FROM orders` never lends its reading to
+`DELETE FROM orders WHERE id = 1`, and a statement with no reading has none, which is not the same
+as a safe one. When no ranking request has carried a statement, the editor asks about it on its own
+after the same settle window. It is all on the same switch as ranking and equally best-effort: a
+model that is missing, slow or unsure costs the ranking, the badge and nothing else.
+
+The scale has one measured blind spot, and the statement's own text closes it. An `UPDATE` that
+names no row reads as a bounded write — 1.06, against 1.00 for a bounded one — because the question
+turns on what the statement does and not on what it fails to name. So a reading is *floored*: an
+`UPDATE` or `DELETE` whose text bounds itself with neither a `WHERE` nor a `LIMIT` at the top
+level (a `TRUNCATE` outright) is marked at the rows step whatever the model read — raised, never
+lowered, with the model's position and confidence kept on the reading and the tooltip quoting both
+voices. The check reads the statement's own tokens, with literals, comments, quoted identifiers and
+dollar quotes blanked by a scanner that mirrors the splitter's, so a `WHERE` inside a string or a
+subquery bounds nothing; a statement cut at the head is out of its reach, because its tail was read
+by nobody and the model's answer stands alone (`presented` and `reachesEveryRow` in
+`src/lib/statementRisk.ts`).
 
 **A statement that failed is a question of its own.** The decision layer carries a third question
 beside those two, and it is the only one whose subject is not the line being typed: a command came

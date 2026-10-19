@@ -8,6 +8,8 @@ import {
   isDestructive,
   MAX_RISK_STATEMENTS,
   MAX_STATEMENT_CHARS,
+  presented,
+  reachesEveryRow,
   riskLabel,
   statementsInScript,
   statementsToRun,
@@ -140,6 +142,100 @@ test("the worst reading of a set decides, and a set with none is not a safe one"
   // known" — the two look the same on screen and are not the same fact.
   assert.equal(worst([null, undefined]), null);
   assert.equal(worst([]), null);
+});
+
+// -------------------------------------------------------- the text floor -------
+
+test("an UPDATE that names no row is the rows step whatever the model read", () => {
+  // Measured, the model reads this 1.06 — a bounded write, one step above a
+  // one-row DELETE and two below what the statement's own text says. The floor
+  // is what closes that gap; see src-tauri/src/decision.rs for the numbers.
+  const unbounded = read("UPDATE orders SET status = 'paid'", "bounded", 1.06);
+  assert.equal(riskLabel(unbounded), "Removes every row");
+  assert.equal(isDestructive(unbounded), true);
+  assert.equal(presented(unbounded)?.verdict, "rows");
+  // Raised, not rewritten: the model's position and confidence stay on the
+  // reading, which is what lets the tooltip quote both voices.
+  assert.equal(presented(unbounded)?.level, 1.06);
+  assert.equal(presented(unbounded)?.confidence, 0.9);
+  // The same of a statement the model missed entirely — a null reading stays
+  // null, because the floor raises a reading and does not invent one.
+  assert.equal(presented(null), null);
+});
+
+test("the floor applies only where the statement's own text says every row", () => {
+  // A WHERE at the top level bounds the statement, and the model's step stands.
+  assert.equal(
+    riskLabel(read("UPDATE orders SET status = 'paid' WHERE id = 1", "bounded", 1.0)),
+    null,
+  );
+  assert.equal(reachesEveryRow("DELETE FROM orders WHERE id IN (1, 2)"), false);
+  // A LIMIT bounds the count where the dialect offers one (MySQL), and a
+  // subquery's own clauses bound only the subquery.
+  assert.equal(reachesEveryRow("UPDATE t SET a = 1 LIMIT 1"), false);
+  assert.equal(reachesEveryRow("DELETE FROM orders ORDER BY id LIMIT 10"), false);
+  assert.equal(reachesEveryRow("UPDATE t SET a = (SELECT x FROM s LIMIT 1)"), true);
+  // Statements keep their leading comment (the splitter's contract), so the
+  // floor has to read past one to find the head at all.
+  assert.equal(reachesEveryRow("-- a comment\nUPDATE t SET a = 1"), true);
+  // One inside a literal, a quoted identifier, a comment or a subquery does not
+  // bound anything — the statement is still unbounded.
+  assert.equal(reachesEveryRow("UPDATE t SET note = 'WHERE id = 1'"), true);
+  assert.equal(reachesEveryRow("UPDATE t SET note = 'it''s WHERE id = 1'"), true);
+  assert.equal(reachesEveryRow("UPDATE `where` SET a = 1"), true);
+  assert.equal(reachesEveryRow("UPDATE t SET a = 1 /* WHERE id = 1 */"), true);
+  assert.equal(reachesEveryRow("UPDATE t SET a = 1 -- WHERE id = 1\n"), true);
+  assert.equal(reachesEveryRow("UPDATE t SET a = (SELECT x FROM s WHERE s.id = t.id)"), true);
+  assert.equal(reachesEveryRow("UPDATE t SET a = $$WHERE id = 1$$"), true);
+  // A placeholder is not a dollar quote, and a word that only holds WHERE is not
+  // a WHERE.
+  assert.equal(reachesEveryRow("UPDATE t SET a = $1"), true);
+  assert.equal(reachesEveryRow("UPDATE t SET a = 1 WHERE x LIKE '%elsewhere%'"), false);
+  // DELETE bounds itself the same way; TRUNCATE is unbounded outright; and the
+  // match is on words, not case or identifiers that merely contain them.
+  assert.equal(reachesEveryRow("DELETE FROM orders"), true);
+  assert.equal(reachesEveryRow("truncate table orders"), true);
+  assert.equal(reachesEveryRow("SELECT updated_at FROM orders WHERE id = 1"), false);
+  assert.equal(reachesEveryRow("INSERT INTO orders SELECT * FROM old_orders"), false);
+});
+
+test("a statement cut at the head is out of the floor's reach", () => {
+  // A statement this long was truncated before the model saw it: the tail where
+  // a WHERE would sit was read by nobody, so the model's answer stands alone.
+  const tail = ` WHERE id IN (${"1,".repeat(MAX_STATEMENT_CHARS - 200)})`;
+  const truncated = `UPDATE orders SET status = 'paid'${tail}`.slice(0, MAX_STATEMENT_CHARS);
+  assert.equal(truncated.length, MAX_STATEMENT_CHARS);
+  assert.equal(reachesEveryRow(truncated), false);
+  assert.equal(riskLabel(read(truncated, "bounded", 1.06)), null);
+});
+
+test("the worst reading decides on the raised step and hands back the model's own", () => {
+  const unbounded = read("UPDATE orders SET status = 'paid'", "bounded", 1.06);
+  const bounded = read("UPDATE orders SET note = 'x' WHERE id = 1", "bounded", 1.4);
+  // The floored reading wins the set even though the model put it lower: the
+  // set's worst is the worst of what each statement reaches.
+  assert.equal(worst([bounded, unbounded]), unbounded);
+  // Raised, never lowered — a structure reading still outranks a floored one.
+  const drop = read("DROP TABLE orders", "structure", 2.988);
+  assert.equal(worst([unbounded, drop]), drop);
+  // And the returned reading is the model's own, so a caller that quotes it
+  // quotes the model, not the floor.
+  assert.equal(worst([unbounded])?.verdict, "bounded");
+});
+
+test("the tooltip of a raised reading quotes both voices", () => {
+  const title = destructiveTitle(read("UPDATE orders SET status = 'paid'", "bounded", 1.06, 0.9));
+  // The step the text states, and the lower one the model read: a raised reading
+  // quoted as the model's own would be a claim the model never made.
+  assert.ok(title.includes("removes or rewrites every row of a table"), title);
+  assert.ok(title.includes("writes a bounded number of existing rows"), title);
+  assert.match(title, /90%/, title);
+  assert.match(title, /position 1\.06/, title);
+  assert.match(title, /this exact statement/, title);
+  assert.ok(title.includes("UPDATE orders SET status = 'paid'"), title);
+  // An unraised reading keeps the model-words-only tooltip.
+  const plain = destructiveTitle(read("DROP TABLE orders", "structure", 2.988, 0.963));
+  assert.ok(plain.includes("The local model put this statement"), plain);
 });
 
 // -------------------------------------------------------------- the store ------

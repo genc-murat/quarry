@@ -1,6 +1,6 @@
 import { TriangleAlert } from "lucide-react";
 
-import { destructiveTitle, riskLabel } from "@/lib/statementRisk";
+import { destructiveTitle, presented, riskLabel } from "@/lib/statementRisk";
 import type { StatementReading } from "@/lib/types";
 
 /**
@@ -13,7 +13,9 @@ import type { StatementReading } from "@/lib/types";
  * statement the model never saw would be a claim nothing supports. The words are
  * the message — the colour only reinforces them — and `data-statement-risk` makes
  * the mark assertable without reading styles, the way `data-assistant-status` does
- * for the indicator.
+ * for the indicator. The mark carries the step the reading was left on — the
+ * statement's own text raises the model's where that is the surer of the two —
+ * so the attribute never disagrees with the words beside it.
  *
  * `subject` says which command's text the reading is about. Run and the Script
  * button send different sets of statements, so their marks have to be tellable
@@ -26,11 +28,12 @@ export function StatementRiskBadge({
   read: StatementReading | null;
   subject?: "run" | "script";
 }) {
-  const label = riskLabel(read);
-  if (!read || !label) return null;
+  const shown = presented(read);
+  const label = riskLabel(shown);
+  if (!read || !shown || !label) return null;
   return (
     <span
-      data-statement-risk={read.verdict}
+      data-statement-risk={shown.verdict}
       data-statement-risk-subject={subject}
       title={destructiveTitle(read)}
       className="flex select-none items-center gap-1 text-[11px] text-warning"

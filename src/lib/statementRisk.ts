@@ -23,6 +23,12 @@
  *   chosen by measurement (`src-tauri/src/decision.rs`, `RISK_SCALE`). Which step
  *   is worth a warning is the editor's policy, so it is defined here and nowhere
  *   else: the client reports a step and holds no opinion about it.
+ *
+ * The scale has one measured blind spot, and the statement's own text closes it:
+ * an `UPDATE` that names no row reads as a bounded write (1.06, measured) where
+ * its text says the rows step outright. Where the text is that much more precise
+ * than the model, the reading is raised to the step the text describes — never
+ * lowered, and the model's own words stay on the reading. See `presented`.
  */
 import { splitStatements, sqlToRun, statementAtCursor } from "./sqlScript";
 import type { RiskVerdict, StatementReading } from "./types";
@@ -66,9 +72,11 @@ const WARNING_LABELS: Record<"rows" | "structure", string> = {
  *
  * Null covers both "this is an ordinary statement" and "there is no reading":
  * the badge draws nothing either way, and what it must never do is draw nothing
- * for a statement the model called dangerous.
+ * for a statement the model called dangerous — or for one whose own text says
+ * what the model's step missed.
  */
-export function riskLabel(read: StatementReading | null | undefined): string | null {
+export function riskLabel(input: StatementReading | null | undefined): string | null {
+  const read = presented(input);
   if (!read) return null;
   return read.verdict === "rows" || read.verdict === "structure"
     ? WARNING_LABELS[read.verdict]
@@ -102,12 +110,26 @@ function oneLine(statement: string): string {
  * statement it answered about — the last because a command can be about to send
  * several statements, and a mark that did not say which one it meant would leave
  * the reader to guess.
+ *
+ * A reading the text floor raised says both halves: the step the text states and
+ * the lower one the model read, because the tooltip's promise is that it quotes
+ * the model faithfully, and a raised reading quoted as the model's own would be
+ * a claim the model never made.
  */
-export function destructiveTitle(read: StatementReading): string {
+export function destructiveTitle(input: StatementReading): string {
+  const read = presented(input);
+  if (read && read !== input) {
+    return (
+      `The statement's own text reaches “${STEP_WORDS[read.verdict]}” — it names no row to stop at — ` +
+      `where the local model read “${STEP_WORDS[input.verdict]}” ` +
+      `(${Math.round(input.confidence * 100)}% sure, position ${input.level.toFixed(2)}). ` +
+      `It was asked about this exact statement: ${oneLine(read.statement)}`
+    );
+  }
   return (
-    `The local model put this statement at “${STEP_WORDS[read.verdict]}” on its scale ` +
-    `(${Math.round(read.confidence * 100)}% sure, position ${read.level.toFixed(2)}). ` +
-    `It was asked about this exact statement: ${oneLine(read.statement)}`
+    `The local model put this statement at “${STEP_WORDS[input.verdict]}” on its scale ` +
+    `(${Math.round(input.confidence * 100)}% sure, position ${input.level.toFixed(2)}). ` +
+    `It was asked about this exact statement: ${oneLine(input.statement)}`
   );
 }
 
@@ -132,8 +154,177 @@ export function wholeScriptTitle(
 const STEP_ORDER: Record<RiskVerdict, number> = { safe: 0, bounded: 1, rows: 2, structure: 3 };
 
 /**
- * The worst reading of a set: the highest step, and among readings on the same
- * step the one the model put furthest along it. Null when the set holds no
+ * The head a statement that can reach every row starts with, read off masked
+ * code: `UPDATE` and `DELETE` are every-row statements exactly when they bound
+ * themselves, and `TRUNCATE` is one unconditionally.
+ */
+const EVERY_ROW_HEAD = /^\s*(update|delete|truncate)\b/i;
+
+/**
+ * `statement` with every literal and comment blanked to spaces, so what is left
+ * is the code alone: keywords and the parens that bound them.
+ *
+ * The state machine mirrors the splitter in `sqlScript.ts` (and behind it
+ * `src-tauri/src/sql_split.rs`) state for state — strings with their escapes and
+ * doublings, quoted identifiers, `--`, `#` and block comments, dollar quotes —
+ * because the statement this is handed was cut by that splitter, and a scanner
+ * that disagreed with it about where a literal ends could read a keyword the
+ * splitter kept inside one. One deliberate difference of *reach*: a `#` that the
+ * dialect treats as an operator rather than a comment can only hide a `WHERE`
+ * here, which leaves the model's reading standing — a missed floor, never a
+ * false one.
+ */
+function masked(statement: string): string {
+  let out = "";
+  let state: "normal" | "single" | "double" | "backtick" | "line" | "block" | "dollar" = "normal";
+  for (let i = 0; i < statement.length; ) {
+    const ch = statement[i];
+    const next = statement[i + 1] ?? "";
+    if (state === "normal") {
+      if (ch === "'" || ch === '"' || ch === "`") {
+        state = ch === "'" ? "single" : ch === '"' ? "double" : "backtick";
+        out += " ";
+        i += 1;
+      } else if ((ch === "-" && next === "-") || ch === "#") {
+        state = "line";
+        out += ch === "-" ? "  " : " ";
+        i += ch === "-" ? 2 : 1;
+      } else if (ch === "/" && next === "*") {
+        state = "block";
+        out += "  ";
+        i += 2;
+      } else if (ch === "$") {
+        // A `$tag$` opener as the splitter reads it; a lone `$` is an ordinary
+        // character, which is what keeps a placeholder like `$1` in code.
+        const tag = dollarTagAt(statement, i);
+        if (!tag) {
+          out += ch;
+          i += 1;
+        } else {
+          // The literal's own text is blanked too: nothing inside it is code.
+          const close = statement.slice(i + tag.length).indexOf(tag);
+          const end = close < 0 ? statement.length : i + tag.length + close + tag.length;
+          out += " ".repeat(end - i);
+          i = end;
+        }
+      } else {
+        out += ch;
+        i += 1;
+      }
+      continue;
+    }
+    if (state === "single") {
+      // The MySQL escape, which the splitter honours only inside single quotes.
+      if (ch === "\\") {
+        out += "  ";
+        i += 2;
+        continue;
+      }
+      if (ch === "'" && next === "'") {
+        out += "  ";
+        i += 2;
+        continue;
+      }
+      if (ch === "'") state = "normal";
+    } else if (state === "double") {
+      if (ch === '"' && next === '"') {
+        out += "  ";
+        i += 2;
+        continue;
+      }
+      if (ch === '"') state = "normal";
+    } else if (state === "backtick") {
+      if (ch === "`") state = "normal";
+    } else if (state === "line") {
+      if (ch === "\n") state = "normal";
+    } else if (state === "block") {
+      if (ch === "*" && next === "/") {
+        out += "  ";
+        i += 2;
+        state = "normal";
+        continue;
+      }
+    }
+    out += " ";
+    i += 1;
+  }
+  return out;
+}
+
+/** A `$tag$` opener at `at`, as `readDollarTag` in `sqlScript.ts` reads one. */
+function dollarTagAt(statement: string, at: number): string | null {
+  let tag = "$";
+  for (let i = at + 1; i < statement.length; i += 1) {
+    const ch = statement[i];
+    if (ch === "$") return `${tag}$`;
+    if (/[A-Za-z0-9_]/.test(ch)) {
+      tag += ch;
+      continue;
+    }
+    return null;
+  }
+  return null;
+}
+
+/** Whether a `WHERE` or a `LIMIT` at the top level bounds the statement. */
+function hasTopLevelBound(code: string): boolean {
+  let depth = 0;
+  for (const match of code.matchAll(/\bwhere\b|\blimit\b|\(|\)/gi)) {
+    if (match[0] === "(") depth += 1;
+    else if (match[0] === ")") depth = Math.max(0, depth - 1);
+    else if (depth === 0) return true;
+  }
+  return false;
+}
+
+/**
+ * Whether the statement's own text says it reaches every row.
+ *
+ * The measured gap this closes: an `UPDATE` that names no row reads as a bounded
+ * write on the model's scale (1.06, against 1.00 for a bounded one —
+ * `src-tauri/src/decision.rs` keeps the numbers), because the question it was
+ * worded from turns on what the statement does and not on what it fails to name.
+ * The text has the answer the scale misses: an `UPDATE` or `DELETE` that bounds
+ * itself is not one — and bounding is a `WHERE` at the top level, or a `LIMIT`
+ * where the dialect offers one (MySQL does); a clause inside a literal, a
+ * comment or a subquery does not bound anything. A `TRUNCATE` is unbounded
+ * outright.
+ *
+ * A statement cut at the head (`MAX_STATEMENT_CHARS`) is out of bounds here: its
+ * tail, where a `WHERE` would sit, was never read by the model or by this, so
+ * "none in sight" is not evidence. The model's answer, which saw the same head,
+ * stands alone — the floor speaks only where it has read the whole statement.
+ */
+export function reachesEveryRow(statement: string): boolean {
+  if (statement.length >= MAX_STATEMENT_CHARS) return false;
+  const code = masked(statement);
+  const head = code.match(EVERY_ROW_HEAD);
+  if (!head) return false;
+  if (head[1].toUpperCase() === "TRUNCATE") return true;
+  return !hasTopLevelBound(code);
+}
+
+/**
+ * A reading as the badge shows it: the model's step, raised to `rows` when the
+ * statement's own text already reaches that far.
+ *
+ * Raised, never lowered — a `structure` reading of a statement with a `WHERE`
+ * stays a `structure` reading — and everything else on the reading stays as the
+ * model said it: the level, the confidence and the statement are its answer's,
+ * and the tooltip quotes both voices where they differ. Null in, null out.
+ */
+export function presented(read: StatementReading | null | undefined): StatementReading | null {
+  if (!read) return null;
+  if (STEP_ORDER[read.verdict] >= STEP_ORDER.rows) return read;
+  return reachesEveryRow(read.statement) ? { ...read, verdict: "rows" } : read;
+}
+
+/**
+ * The worst reading of a set: the highest step — the step the text floor leaves
+ * a reading on, where that is higher than the model's — and among readings on
+ * the same step the one the model put furthest along it. The reading handed back
+ * is the model's own, unraised: what the text adds is the badge's business, and
+ * the tooltip needs both voices to tell it honestly. Null when the set holds no
  * reading at all — which is not the same as a set of safe ones, and is why this
  * hands back null rather than a made-up safe reading.
  */
@@ -141,14 +332,18 @@ export function worst(
   readings: Iterable<StatementReading | null | undefined>,
 ): StatementReading | null {
   let found: StatementReading | null = null;
+  let shown: StatementReading | null = null;
   for (const read of readings) {
     if (!read) continue;
+    const readShown = presented(read);
+    if (!readShown) continue;
     if (
-      !found ||
-      STEP_ORDER[read.verdict] > STEP_ORDER[found.verdict] ||
-      (STEP_ORDER[read.verdict] === STEP_ORDER[found.verdict] && read.level > found.level)
+      !shown ||
+      STEP_ORDER[readShown.verdict] > STEP_ORDER[shown.verdict] ||
+      (STEP_ORDER[readShown.verdict] === STEP_ORDER[shown.verdict] && readShown.level > shown.level)
     ) {
       found = read;
+      shown = readShown;
     }
   }
   return found;

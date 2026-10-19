@@ -107,3 +107,27 @@ test("every row of a table is its own mark, in its own words", async () => {
     await view.unmount();
   }
 });
+
+test("a reading the statement's own text raises is marked at the raised step", async () => {
+  // What a real model read an `UPDATE` that names no row as: a bounded write.
+  // The text says the rows step outright, so the mark is the text's — and the
+  // attribute agrees with the words beside it.
+  const raised: StatementReading = {
+    statement: "UPDATE orders SET status = 'paid'",
+    verdict: "bounded",
+    level: 1.06,
+    confidence: 0.9,
+  };
+  const view = await mount(<StatementRiskBadge read={raised} />);
+  try {
+    assert.equal(view.text().trim(), "Removes every row");
+    assert.ok(view.container.querySelector('[data-statement-risk="rows"]'));
+    const title = view.container.querySelector("[data-statement-risk]")?.getAttribute("title");
+    // Both voices: the step the text states and the lower one the model read.
+    assert.match(title ?? "", /removes or rewrites every row of a table/);
+    assert.match(title ?? "", /writes a bounded number of existing rows/);
+    assert.match(title ?? "", /this exact statement/);
+  } finally {
+    await view.unmount();
+  }
+});
