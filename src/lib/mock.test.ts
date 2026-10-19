@@ -109,11 +109,25 @@ test("PostgreSQL reports its schemas and scopes objects to the selected one", as
   assert.ok(audit.length > 0);
   assert.deepEqual([...new Set(audit.map((entry) => entry.schema))], ["audit"]);
 
-  // Every other engine has no schemas, so the namespace list stays empty.
-  for (const fixture of FIXTURES.filter((entry) => entry.driver.id !== "postgres")) {
+  // Every schema-less engine has no namespaces, so the list stays empty; the
+  // schema-aware ones besides PostgreSQL report theirs the same way.
+  for (const fixture of FIXTURES.filter(
+    (entry) => entry.driver.id !== "postgres" && !entry.driver.capabilities.supportsSchemas,
+  )) {
     const none = await call<unknown[]>("list_namespaces", { connectionId: fixture.session.id });
     assert.deepEqual(none, [], fixture.driver.id);
   }
+
+  // SQL Server reports its schemas from `sys.schemas`, the same contract.
+  const mssql = FIXTURES.find((fixture) => fixture.driver.id === "mssql");
+  assert.ok(mssql);
+  const mssqlNamespaces = await call<{ name: string }[]>("list_namespaces", {
+    connectionId: mssql.session.id,
+  });
+  assert.deepEqual(
+    mssqlNamespaces.map((entry) => entry.name),
+    ["dbo", "audit"],
+  );
 });
 
 test("each SQL engine explains in its own dialect and plan shape", async () => {
@@ -249,6 +263,13 @@ test("only the engine that declares inspector sections answers the section comma
 });
 
 test("generated DDL is quoted in the engine's own dialect", async () => {
+  // What each engine's dialect wraps an identifier in, as the driver declares
+  // it — spelled here so the test can catch the mock sending the wrong one.
+  // SQL Server's brackets do not close with the character they open with.
+  const QUOTES: Record<string, readonly [string, string]> = {
+    mysql: ["`", "`"],
+    mssql: ["[", "]"],
+  };
   for (const fixture of FIXTURES) {
     const object = fixture.objects[0];
     const detail = await call<ObjectDetail>("object_detail", {
@@ -257,15 +278,15 @@ test("generated DDL is quoted in the engine's own dialect", async () => {
       namespace: namespaceOf(fixture),
       object: object.name,
     });
-    const quote = fixture.driver.id === "mysql" ? "`" : '"';
-    assert.equal(detail.identifierQuote, quote, fixture.driver.id);
+    const [open, close] = QUOTES[fixture.driver.id] ?? ['"', '"'];
+    assert.equal(detail.identifierQuote, open, fixture.driver.id);
     if (fixture.driver.capabilities.isRelational) {
       assert.ok(
         detail.ddl.startsWith("CREATE TABLE"),
         `${fixture.driver.id} has no CREATE: ${detail.ddl.split("\n")[0]}`,
       );
       assert.ok(
-        detail.ddl.includes(`${quote}${object.name}${quote}`),
+        detail.ddl.includes(`${open}${object.name}${close}`),
         `${fixture.driver.id} did not quote ${object.name}: ${detail.ddl.split("\n")[0]}`,
       );
     } else {

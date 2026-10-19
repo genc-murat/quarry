@@ -81,6 +81,8 @@ pub fn run() {
                 running: Arc::new(QueryRegistry::new()),
                 decision: Arc::new(DecisionClient::new()),
             });
+            // Paths the script-save dialog grants, which the write half accepts.
+            app.manage(scripts::ScriptGrants::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -117,7 +119,8 @@ pub fn run() {
             commands::get_settings,
             commands::set_settings,
             commands::rank_candidates,
-            scripts::write_script_file,
+            scripts::pick_script_path,
+            scripts::save_script_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

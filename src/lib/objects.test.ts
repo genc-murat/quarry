@@ -1,12 +1,64 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { OBJECT_KIND_LABEL, OBJECT_KIND_ORDER, groupObjectsByKind } from "./objects.ts";
+import {
+  OBJECT_KIND_LABEL,
+  OBJECT_KIND_ORDER,
+  dialectForDriver,
+  groupObjectsByKind,
+  qualifiedName,
+  quoteIdentifier,
+  templateSql,
+} from "./objects.ts";
 import type { DatabaseObject } from "./types.ts";
 
 function obj(name: string, kind: DatabaseObject["kind"]): DatabaseObject {
   return { name, kind, schema: "shop" };
 }
+
+test("brackets quote and escape where the closing differs from the opening", () => {
+  assert.equal(quoteIdentifier("orders", "["), "[orders]");
+  // A bracket identifier escapes by doubling the closing bracket, not the
+  // opening one — the symmetric doubling would produce "[a[[b[".
+  assert.equal(quoteIdentifier("a]b", "["), "[a]]b]");
+  assert.equal(quoteIdentifier("a`b", "`"), "`a``b`");
+  assert.equal(quoteIdentifier('a"b', '"'), "\"a\"\"b\"");
+  assert.equal(
+    qualifiedName({ database: "shop", namespace: "dbo", object: "orders" }, "["),
+    "[dbo].[orders]",
+  );
+});
+
+test("the sqlserver dialect is its own, and its select template takes TOP", () => {
+  assert.equal(dialectForDriver("mssql"), "sqlserver");
+  assert.equal(dialectForDriver("postgres"), "postgres");
+  const detail = {
+    schema: {
+      name: "orders",
+      kind: "table" as const,
+      columns: [
+        { name: "id", dataType: "int", nullable: false, isPrimaryKey: true, isAutoIncrement: true, ordinal: 1 },
+        { name: "status", dataType: "nvarchar(20)", nullable: false, isPrimaryKey: false, isAutoIncrement: false, ordinal: 2 },
+      ],
+      indexes: [],
+      foreignKeys: [],
+    },
+    ddl: "",
+    rowCount: null,
+    sizeBytes: null,
+    actions: [],
+    identifierQuote: "[",
+    sections: [],
+  };
+  const ref = { database: "shop", namespace: "dbo", object: "orders" };
+  assert.equal(
+    templateSql("select", ref, detail),
+    "SELECT TOP 100 [id], [status]\nFROM [dbo].[orders];",
+  );
+  // Every other dialect keeps its `LIMIT`.
+  const pgDetail = { ...detail, identifierQuote: '"' };
+  assert.match(templateSql("select", ref, pgDetail), /LIMIT 100;/);
+});
 
 test("groups follow the declared kind order", () => {
   const groups = groupObjectsByKind([

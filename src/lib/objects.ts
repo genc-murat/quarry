@@ -80,8 +80,11 @@ export function objectKey(ref: ObjectRef): string {
   return `${ref.sessionId}||${ref.database}||${ref.namespace ?? ""}||${ref.object}`;
 }
 
-/** Quote an identifier using the driver's quote character. */
+/** Quote an identifier using the driver's quote character. SQL Server's
+ *  brackets are the one pair that does not close with its opening character,
+ *  so they escape by doubling the closing bracket instead. */
 export function quoteIdentifier(name: string, quote = '"'): string {
+  if (quote === "[") return `[${name.split("]").join("]]")}]`;
   return `${quote}${name.split(quote).join(quote + quote)}${quote}`;
 }
 
@@ -91,11 +94,12 @@ export function quoteIdentifier(name: string, quote = '"'): string {
  * differs (identity vs. `INTEGER PRIMARY KEY AUTOINCREMENT`), so the preview
  * builders key off the driver id instead.
  */
-export type SqlDialect = "mysql" | "postgres" | "sqlite" | "clickhouse";
+export type SqlDialect = "mysql" | "postgres" | "sqlite" | "sqlserver" | "clickhouse";
 
 export function dialectForDriver(driverId: string | null | undefined): SqlDialect {
   if (driverId === "mysql") return "mysql";
   if (driverId === "sqlite") return "sqlite";
+  if (driverId === "mssql") return "sqlserver";
   if (driverId === "clickhouse") return "clickhouse";
   return "postgres";
 }
@@ -208,7 +212,11 @@ export function templateSql(
 
   switch (kind) {
     case "select":
-      return `SELECT ${columns.map(quoted).join(", ") || "*"}\nFROM ${table}\nLIMIT 100;`;
+      // T-SQL has no `LIMIT`; its row bound rides on `TOP`. The brackets are
+      // what tell the dialect apart here, the same fact the quoting uses.
+      return quote === "["
+        ? `SELECT TOP 100 ${columns.map(quoted).join(", ") || "*"}\nFROM ${table};`
+        : `SELECT ${columns.map(quoted).join(", ") || "*"}\nFROM ${table}\nLIMIT 100;`;
     case "insert":
       return `INSERT INTO ${table} (${columns.map(quoted).join(", ")})\nVALUES (${columns
         .map(() => "?")

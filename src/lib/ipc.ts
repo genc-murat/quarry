@@ -148,10 +148,25 @@ export const ipc = {
   rankCandidates: (request: RankCandidatesRequest) =>
     call<RankCandidatesResponse>("rank_candidates", { request }),
 
-  /** Write a SQL script file (desktop; the native picker is `scriptFiles.ts`). */
-  writeScriptFile: (path: string, contents: string) =>
-    call<void>("write_script_file", { path, contents }),
+  /** Ask the shell where a script should live (desktop; the dialog opens on
+   *  the Rust side, which returns the file's path and the save capability). */
+  pickScriptPath: (fileName: string) =>
+    call<GrantedScript | null>("pick_script_path", { fileName }),
+
+  /** Save a script: writes straight to the file a granted token names, or
+   *  puts the save dialog up first. Returns the fresh grant, or null when
+   *  the dialog was cancelled. */
+  saveScriptFile: (token: string | null, fileName: string, contents: string) =>
+    call<GrantedScript | null>("save_script_file", { token, fileName, contents }),
 };
+
+/** Where a script lives, plus the opaque capability to save there again —
+ *  the shell issues both together and accepts only the pair. The token is
+ *  null only outside the shell, where there is nothing to save through. */
+export interface GrantedScript {
+  path: string;
+  token: string | null;
+}
 
 /** Normalise an unknown thrown value into a readable message. */
 export function errorMessage(error: unknown): string {

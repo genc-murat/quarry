@@ -7,6 +7,7 @@
 
 pub mod clickhouse;
 pub mod mongo;
+pub mod mssql;
 pub mod mysql;
 pub mod postgres;
 pub mod redis;
@@ -367,6 +368,7 @@ impl DriverRegistry {
         };
         registry.register(Arc::new(clickhouse::ClickHouseDriver::new()));
         registry.register(Arc::new(mongo::MongoDriver::new()));
+        registry.register(Arc::new(mssql::MssqlDriver::new()));
         registry.register(Arc::new(mysql::MySqlDriver::new()));
         registry.register(Arc::new(postgres::PostgresDriver::new()));
         registry.register(Arc::new(sqlite::SqliteDriver::new()));

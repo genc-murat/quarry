@@ -138,6 +138,12 @@ export interface QueryTab {
   kind: "query" | "object" | "script";
   /** Set for `script` tabs once the user has chosen where it lives. */
   filePath: string | null;
+  /**
+   * The shell's save capability for that path — an opaque key the shell itself
+   * issued with the dialog, which `save_script_file` trades for the write. It
+   * never names a path, and it dies with the run: a restored tab re-asks.
+   */
+  fileToken: string | null;
   sql: string;
   sessionId: string | null;
   database: string | null;
@@ -818,6 +824,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       title: init?.title ?? `${kind === "script" ? "Script" : "Query"} ${tabCounter}`,
       kind,
       filePath: init?.filePath ?? null,
+      fileToken: init?.fileToken ?? null,
       sql: init?.sql ?? "",
       sessionId,
       database: init?.database ?? null,
@@ -841,8 +848,14 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     // Ask where the script lives right away, like DBeaver's "New SQL script".
     // A cancelled picker leaves an untitled script the user can still type into.
     try {
-      const path = await pickScriptPath(suggestedScriptName(get(), id));
-      if (path) get().updateTab(id, { filePath: path, title: scriptName(path) });
+      const granted = await pickScriptPath(suggestedScriptName(get(), id));
+      if (granted) {
+        get().updateTab(id, {
+          filePath: granted.path,
+          fileToken: granted.token,
+          title: scriptName(granted.path),
+        });
+      }
     } catch (error) {
       get().pushToast({
         title: "Could not choose a file",
@@ -864,26 +877,26 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
   saveScript: async (tabId) => {
     const tab = get().tabs.find((t) => t.id === tabId);
     if (!tab) return false;
-    let path = tab.filePath;
-    if (!path) {
-      try {
-        path = await pickScriptPath(suggestedScriptName(get(), tabId));
-      } catch (error) {
-        get().pushToast({
-          title: "Could not choose a file",
-          description: errorMessage(error),
-          variant: "error",
-        });
-        return false;
-      }
-      if (!path) return false;
-      get().updateTab(tabId, { filePath: path, title: scriptName(path) });
-    }
     try {
-      await writeScriptFile(path, tab.sql);
+      // A live token is traded straight for the write; anything else — no
+      // grant yet, or one from an earlier run — puts the save dialog up
+      // first, so a first save always shows where it lands.
+      const granted = await writeScriptFile(
+        tab.fileToken,
+        tab.filePath ? scriptName(tab.filePath) : suggestedScriptName(get(), tabId),
+        tab.sql,
+      );
+      if (!granted) return false;
+      if (granted.path !== tab.filePath || granted.token !== tab.fileToken) {
+        get().updateTab(tabId, {
+          filePath: granted.path,
+          fileToken: granted.token,
+          title: scriptName(granted.path),
+        });
+      }
       get().pushToast({
         title: "Script saved",
-        description: scriptName(path),
+        description: scriptName(granted.path),
         variant: "success",
       });
       return true;
@@ -1079,6 +1092,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       title: ref.object,
       kind: "object",
       filePath: null,
+      fileToken: null,
       sql: "",
       sessionId: ref.sessionId,
       database: ref.database,

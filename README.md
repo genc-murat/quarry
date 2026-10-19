@@ -1,8 +1,8 @@
 # Quarry
 
 A **modular, themeable database studio** written with Tauri v2 (Rust) + React.
-Today it supports **MySQL 5.6**, **PostgreSQL**, **SQLite**, **Redis**, **MongoDB** and **ClickHouse**;
-the architecture lets you add new engines by writing only a new adapter.
+Today it supports **MySQL 5.6**, **PostgreSQL**, **SQLite**, **SQL Server**, **Redis**, **MongoDB**
+and **ClickHouse**; the architecture lets you add new engines by writing only a new adapter.
 
 > The name comes from "quarry": you dig the data out, and the node network in its icon
 > represents databases connected from a single place — the node colors are taken from the
@@ -71,7 +71,8 @@ field is added to the `ObjectDetail` DTO; tab rendering is built entirely from g
 
 ## Tech stack
 
-**Backend (Rust)** — Tauri v2, `tokio`, `sqlx` (MySQL + PostgreSQL + SQLite, rustls), `redis`
+**Backend (Rust)** — Tauri v2, `tokio`, `sqlx` (MySQL + PostgreSQL + SQLite, rustls), `tiberius`
+(SQL Server over TDS, rustls), `redis`
 (connection pool + rustls TLS), `aes-gcm`
 (encrypted local vault for passwords), `serde`, `thiserror`, `tracing`.
 
@@ -90,6 +91,7 @@ src-tauri/
       mysql.rs         # MySQL 5.6+ adapter
       postgres.rs      # PostgreSQL adapter
       sqlite.rs        # SQLite adapter (embedded; end-to-end tests need no server)
+      mssql.rs         # SQL Server adapter (TDS via tiberius; per-database client pools + tests)
       redis.rs         # Redis adapter (one command per line; reply→row mapping + tests)
       mongo.rs         # MongoDB adapter (JSON command documents; cursor reads + tests)
       clickhouse.rs    # ClickHouse adapter (HTTP; system tables + tests)
@@ -221,6 +223,18 @@ cargo test --manifest-path src-tauri/Cargo.toml -- --ignored --nocapture
 For Redis, pass `QUARRY_TEST_REDIS_HOST` to the same run (optionally `_PORT`, `_USER`,
 `_PASSWORD`). For MongoDB use `QUARRY_TEST_MONGO_HOST`, and for ClickHouse
 `QUARRY_TEST_CLICKHOUSE_HOST` (both also accept optional `_PORT`, `_USER`, `_PASSWORD`).
+For SQL Server, the password is the one required variable and the doc comment on
+`drivers::mssql::tests::connects_introspects_and_runs_statements` shows the whole
+round trip, container included:
+
+```bash
+export QUARRY_TEST_MSSQL_PASSWORD='pick a compliant sa password'
+docker run -d --name quarry-mssql -e ACCEPT_EULA=Y \
+  -e "MSSQL_SA_PASSWORD=$QUARRY_TEST_MSSQL_PASSWORD" -p 14330:1433 \
+  mcr.microsoft.com/mssql/server:2022-latest
+QUARRY_TEST_MSSQL_HOST=127.0.0.1 QUARRY_TEST_MSSQL_PORT=14330 \
+cargo test --manifest-path src-tauri/Cargo.toml mssql::tests::connects -- --ignored --nocapture
+```
 
 **What a keystroke costs.** A question to the decision model takes ~450 ms, so the work in
 `src/lib/rankCache.ts` is all about not asking. A question is the line *plus* the list of tables it

@@ -439,6 +439,148 @@ const POSTGRES: EngineFixture = {
   },
 };
 
+const MSSQL_ORDERS = schemaOf("orders", "table", [
+  column("id", "int", { isPrimaryKey: true, isAutoIncrement: true }),
+  column("customer_id", "int"),
+  column("status", "nvarchar(20)"),
+  column("total", "decimal(12,2)"),
+  column("note", "nvarchar(max)", { nullable: true }),
+  column("is_rush", "bit"),
+  column("created_at", "datetime2"),
+], {
+  indexes: [
+    { name: "PK__orders", columns: ["id"], unique: true, primary: true },
+    { name: "idx_customer", columns: ["customer_id"], unique: false, primary: false },
+  ],
+  foreignKeys: [
+    {
+      name: "fk_orders_customer",
+      columns: ["customer_id"],
+      referencedTable: "customers",
+      referencedColumns: ["id"],
+    },
+  ],
+});
+
+const MSSQL_OBJECTS: DatabaseObject[] = [
+  { name: "customers", kind: "table", schema: "dbo", comment: "Registered buyers", rowEstimate: 12480 },
+  { name: "orders", kind: "table", schema: "dbo", comment: "Order headers", rowEstimate: 58231 },
+  { name: "order_items", kind: "table", schema: "dbo", comment: null, rowEstimate: 173904 },
+  { name: "products", kind: "table", schema: "dbo", comment: "Catalogue", rowEstimate: 812 },
+  { name: "v_recent_orders", kind: "view", schema: "dbo", comment: "Last 30 days", rowEstimate: null },
+  { name: "seq_order_numbers", kind: "sequence", schema: "dbo", comment: null, rowEstimate: null },
+  { name: "sp_close_orders", kind: "procedure", schema: "dbo", comment: null, rowEstimate: null },
+  { name: "trg_orders_audit", kind: "trigger", schema: "dbo", comment: "Audit every order change", rowEstimate: null },
+];
+
+const MSSQL: EngineFixture = {
+  quote: "[",
+  driver: {
+    id: "mssql",
+    displayName: "SQL Server",
+    defaultPort: 1433,
+    accentColor: "#9A4B99",
+    capabilities: {
+      queryLanguage: "sql",
+      resultShape: "tabular",
+      isRelational: true,
+      supportsMultipleDatabases: true,
+      supportsSchemas: true,
+      supportsTransactions: true,
+      supportsDdl: true,
+      supportsExplain: false,
+      supportsCancel: true,
+      objectKinds: ["table", "view", "sequence", "procedure", "trigger"],
+      supportedActions: MOCK_ACTIONS,
+    },
+    configFields: [
+      { key: "host", label: "Host", fieldType: "text", placeholder: "127.0.0.1", required: true, defaultValue: "127.0.0.1", options: [] },
+      { key: "port", label: "Port", fieldType: "number", placeholder: "1433", required: true, defaultValue: 1433, options: [] },
+      { key: "username", label: "Username", fieldType: "text", placeholder: "sa", required: true, defaultValue: "sa", options: [] },
+      { key: "password", label: "Password", fieldType: "password", placeholder: "••••••••", required: false, options: [] },
+      {
+        key: "database",
+        label: "Database",
+        fieldType: "text",
+        placeholder: "master",
+        required: false,
+        defaultValue: "master",
+        options: [],
+        help: "The database the session opens on; leave empty for the login default.",
+      },
+      {
+        key: "sslMode",
+        label: "TLS",
+        fieldType: "select",
+        required: false,
+        defaultValue: "preferred",
+        help: "Encryption uses the server certificate without validating it, like the SQL Server tooling defaults.",
+        options: [
+          { value: "preferred", label: "Preferred" },
+          { value: "required", label: "Required" },
+          { value: "disabled", label: "Disabled" },
+        ],
+      },
+    ],
+  },
+  profile: {
+    id: "demo-mssql",
+    name: "Local SQL Server 2022",
+    driver: "mssql",
+    host: "127.0.0.1",
+    port: 1433,
+    username: "sa",
+    database: "shop",
+    sslMode: "preferred",
+    options: {},
+    hasPassword: true,
+  },
+  server: {
+    version: "Microsoft SQL Server 2022 (RTM-CU14) - 16.0.4135.4 (X64)",
+    versionNumber: 160000,
+    serverComment: null,
+    currentDatabase: "shop",
+    currentUser: "sa",
+    supportsTls: true,
+  },
+  session: {
+    id: "demo-mssql-session",
+    profileId: "demo-mssql",
+    driver: "mssql",
+    name: "Local SQL Server 2022",
+    server: {
+      version: "Microsoft SQL Server 2022 (RTM-CU14) - 16.0.4135.4 (X64)",
+      versionNumber: 160000,
+      serverComment: null,
+      currentDatabase: "shop",
+      currentUser: "sa",
+      supportsTls: true,
+    },
+  },
+  // `sys.databases` with the four the adapter marks as system databases.
+  databases: [
+    { name: "shop", isSystem: false },
+    { name: "analytics", isSystem: false },
+    { name: "master", isSystem: true },
+    { name: "tempdb", isSystem: true },
+    { name: "model", isSystem: true },
+    { name: "msdb", isSystem: true },
+  ],
+  // `sys.schemas` without `sys`, `INFORMATION_SCHEMA`, `guest` and `db_*`.
+  namespaces: [{ name: "dbo" }, { name: "audit" }],
+  objects: MSSQL_OBJECTS,
+  schema: (object, _namespace) =>
+    object === "orders" ? { ...MSSQL_ORDERS, name: object } : genericSchema(object, "table"),
+  ddl: (object) =>
+    `CREATE TABLE [dbo].[${object}] (\n  [id] int IDENTITY(1,1) NOT NULL,\n  [customer_id] int NOT NULL,\n  [status] nvarchar(20) NOT NULL,\n  [total] decimal(12,2) NOT NULL,\n  [note] nvarchar(max) NULL,\n  [is_rush] bit NOT NULL,\n  [created_at] datetime2 NOT NULL,\n  PRIMARY KEY ([id])\n);`,
+  // `INFORMATION_SCHEMA.COLUMNS` covers tables and views; a sequence has no
+  // columns to offer.
+  completableKinds: ["table", "view"],
+  count: (object) => estimateOf(MSSQL_OBJECTS, object),
+  // T-SQL has no EXPLAIN, and the mock refuses one the way the adapter does:
+  // no `plan` and no `explainStatement` is exactly that refusal.
+};
+
 const SQLITE_ORDERS = schemaOf("orders", "table", [
   column("id", "INTEGER", { isPrimaryKey: true, isAutoIncrement: true }),
   column("customer_id", "INTEGER"),
@@ -1339,7 +1481,7 @@ const CLICKHOUSE: EngineFixture = {
 };
 
 /** One fixture per driver; everything else in the mock is generated from it. */
-export const FIXTURES: EngineFixture[] = [MYSQL, POSTGRES, SQLITE, REDIS, MONGO, CLICKHOUSE];
+export const FIXTURES: EngineFixture[] = [MYSQL, POSTGRES, MSSQL, SQLITE, REDIS, MONGO, CLICKHOUSE];
 
 const BY_DRIVER = new Map(FIXTURES.map((fixture) => [fixture.driver.id, fixture]));
 const BY_SESSION = new Map(FIXTURES.map((fixture) => [fixture.session.id, fixture]));

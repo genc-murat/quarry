@@ -93,6 +93,7 @@ function tab(): QueryTab {
     title: "Query 1",
     kind: "query",
     filePath: null,
+    fileToken: null,
     sql: SQL,
     sessionId: "s1",
     database: "main",

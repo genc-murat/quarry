@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { errorMessage, ipc } from "@/lib/ipc";
 import { compareSchemas, migrationDraft, type SchemaDiff } from "@/lib/schemaDiff";
-import { dialectForDriver } from "@/lib/objects";
+import { dialectForDriver, quoteIdentifier } from "@/lib/objects";
 import type { ObjectSchema, SessionInfo } from "@/lib/types";
 import { useWorkspace } from "@/stores/workspace";
 
@@ -53,8 +53,7 @@ export function SchemaToolsPanel() {
       const quote = target.quote;
       const qualify = (table: string) => {
         const qualifier = target.session.driver === "postgres" ? "public" : target.database;
-        const q = (value: string) => `${quote}${value.replaceAll(quote, quote + quote)}${quote}`;
-        return qualifier ? `${q(qualifier)}.${q(table)}` : q(table);
+        return qualifier ? `${quoteIdentifier(qualifier, quote)}.${quoteIdentifier(table, quote)}` : quoteIdentifier(table, quote);
       };
       setSql(migrationDraft(result, quote, qualify, dialectForDriver(target.session.driver)));
     } catch (error) {

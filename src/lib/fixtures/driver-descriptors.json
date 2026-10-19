@@ -201,6 +201,131 @@
     "explainSelect": null
   },
   {
+    "id": "mssql",
+    "displayName": "SQL Server",
+    "defaultPort": 1433,
+    "accentColor": "#9A4B99",
+    "capabilities": {
+      "queryLanguage": "sql",
+      "resultShape": "tabular",
+      "isRelational": true,
+      "supportsMultipleDatabases": true,
+      "supportsSchemas": true,
+      "supportsTransactions": true,
+      "supportsDdl": true,
+      "supportsExplain": false,
+      "supportsCancel": true,
+      "objectKinds": [
+        "table",
+        "view",
+        "sequence",
+        "procedure",
+        "trigger"
+      ],
+      "supportedActions": [
+        "inspect",
+        "viewData",
+        "countRows",
+        "copyName",
+        "copyQualifiedName",
+        "copyDdl",
+        "generateDdl",
+        "templateSelect",
+        "templateInsert",
+        "templateUpdate",
+        "templateDelete",
+        "exportData",
+        "renameObject",
+        "duplicateObject",
+        "dropObject",
+        "truncate",
+        "maintenance",
+        "createIndex",
+        "dropIndex",
+        "addColumn",
+        "alterColumn",
+        "dropColumn"
+      ]
+    },
+    "configFields": [
+      {
+        "key": "host",
+        "label": "Host",
+        "fieldType": "text",
+        "placeholder": "127.0.0.1",
+        "required": true,
+        "defaultValue": "127.0.0.1",
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "port",
+        "label": "Port",
+        "fieldType": "number",
+        "placeholder": "1433",
+        "required": true,
+        "defaultValue": 1433,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "username",
+        "label": "Username",
+        "fieldType": "text",
+        "placeholder": "sa",
+        "required": true,
+        "defaultValue": "sa",
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "password",
+        "label": "Password",
+        "fieldType": "password",
+        "placeholder": "••••••••",
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "database",
+        "label": "Database",
+        "fieldType": "text",
+        "placeholder": "master",
+        "required": false,
+        "defaultValue": "master",
+        "options": [],
+        "help": "The database the session opens on; leave empty for the login default."
+      },
+      {
+        "key": "sslMode",
+        "label": "TLS",
+        "fieldType": "select",
+        "placeholder": null,
+        "required": false,
+        "defaultValue": "preferred",
+        "options": [
+          {
+            "value": "preferred",
+            "label": "Preferred"
+          },
+          {
+            "value": "required",
+            "label": "Required"
+          },
+          {
+            "value": "disabled",
+            "label": "Disabled"
+          }
+        ],
+        "help": "Encryption uses the server certificate without validating it, like the SQL Server tooling defaults."
+      }
+    ],
+    "identifierQuote": "[",
+    "explainSelect": null
+  },
+  {
     "id": "mysql",
     "displayName": "MySQL",
     "defaultPort": 3306,

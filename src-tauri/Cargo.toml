@@ -18,7 +18,7 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-tokio-util = { version = "0.7", features = ["rt"] }
+tokio-util = { version = "0.7", features = ["compat", "rt"] }
 async-trait = "0.1"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
@@ -52,6 +52,11 @@ clickhouse = { version = "0.13", default-features = false, features = [
 # Talks to a local decision model (Ollama's `/v1/systemone`) over plain HTTP on
 # loopback, so no TLS feature is needed; see `src/decision.rs`.
 reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tiberius = { version = "0.13", default-features = false, features = [
+  "tds73",
+  "rustls",
+  "chrono",
+] }
 
 # Update delivery is a desktop concern: the updater reads a release manifest and
 # the process plugin restarts the app into the version it just installed.
