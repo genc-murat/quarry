@@ -1288,10 +1288,7 @@ mod tests {
 
     #[test]
     fn sql_server_row_edits_speak_bit_not_boolean() {
-        assert_eq!(
-            row_value(&serde_json::json!(true), Dialect::SqlServer),
-            "1"
-        );
+        assert_eq!(row_value(&serde_json::json!(true), Dialect::SqlServer), "1");
         assert_eq!(
             row_value(&serde_json::json!(true), Dialect::Postgres),
             "TRUE"

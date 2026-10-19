@@ -185,7 +185,10 @@ impl ConnectionSettings {
         let mut config = Config::new();
         config.host(&self.host);
         config.port(self.port);
-        config.authentication(AuthMethod::sql_server(&self.username, self.password.as_deref().unwrap_or_default()));
+        config.authentication(AuthMethod::sql_server(
+            &self.username,
+            self.password.as_deref().unwrap_or_default(),
+        ));
         if let Some(database) = database.filter(|name| !name.is_empty()) {
             config.database(database);
         }
@@ -276,16 +279,14 @@ impl Drop for ClientGuard {
 /// `Microsoft SQL Server 2019 (RTM-CU23 GDR) ... 15.0.4298.1`. The year comes
 /// first and carries no dot, so the first dotted token is the build.
 fn parse_mssql_version(version: &str) -> Option<String> {
-    version
-        .split_whitespace()
-        .find_map(|token| {
-            let parts: Vec<&str> = token.split('.').collect();
-            (parts.len() >= 2
-                && parts
-                    .iter()
-                    .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())))
-            .then(|| token.to_string())
-        })
+    version.split_whitespace().find_map(|token| {
+        let parts: Vec<&str> = token.split('.').collect();
+        (parts.len() >= 2
+            && parts
+                .iter()
+                .all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit())))
+        .then(|| token.to_string())
+    })
 }
 
 /// Whether a statement's first word names one of the statements whose server
@@ -302,8 +303,19 @@ fn is_dml_statement(sql: &str) -> bool {
         .unwrap_or_default();
     matches!(
         head.as_str(),
-        "INSERT" | "UPDATE" | "DELETE" | "MERGE" | "CREATE" | "ALTER" | "DROP" | "TRUNCATE"
-            | "GRANT" | "REVOKE" | "DENY" | "USE" | "SET"
+        "INSERT"
+            | "UPDATE"
+            | "DELETE"
+            | "MERGE"
+            | "CREATE"
+            | "ALTER"
+            | "DROP"
+            | "TRUNCATE"
+            | "GRANT"
+            | "REVOKE"
+            | "DENY"
+            | "USE"
+            | "SET"
     )
 }
 
@@ -408,16 +420,8 @@ async fn fetch_server_info(client: &mut RawClient) -> Result<ServerInfo> {
         version,
         version_number,
         server_comment: None,
-        current_database: row
-            .try_get::<&str, _>(1)
-            .ok()
-            .flatten()
-            .map(str::to_string),
-        current_user: row
-            .try_get::<&str, _>(2)
-            .ok()
-            .flatten()
-            .map(str::to_string),
+        current_database: row.try_get::<&str, _>(1).ok().flatten().map(str::to_string),
+        current_user: row.try_get::<&str, _>(2).ok().flatten().map(str::to_string),
         supports_tls,
     })
 }
@@ -499,8 +503,12 @@ impl Connection for MssqlConnection {
 
     async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
         let mut guard = self.pool_for(None).await?.acquire().await?;
-        let rows = query_all(guard.client(), "SELECT name FROM sys.databases ORDER BY name", &[])
-            .await?;
+        let rows = query_all(
+            guard.client(),
+            "SELECT name FROM sys.databases ORDER BY name",
+            &[],
+        )
+        .await?;
         Ok(rows
             .into_iter()
             .map(|row| {
@@ -689,7 +697,13 @@ impl Connection for MssqlConnection {
             .collect();
         let foreign_keys = assemble_foreign_key_columns(foreign_key_columns);
 
-        Ok(build_object_schema(object, kind, columns, indexes, foreign_keys))
+        Ok(build_object_schema(
+            object,
+            kind,
+            columns,
+            indexes,
+            foreign_keys,
+        ))
     }
 
     /// One query instead of N: the whole schema's columns at once.
@@ -829,7 +843,11 @@ async fn object_kind(client: &mut RawClient, schema: &str, object: &str) -> Resu
 /// result set or the affected count of a row-count reply. Returns whether the
 /// client came out of the reply mid-message — the mark that says the guard
 /// must close it rather than park it.
-async fn run_statement(client: &mut RawClient, sql: &str, max_rows: usize) -> (StatementResult, bool) {
+async fn run_statement(
+    client: &mut RawClient,
+    sql: &str,
+    max_rows: usize,
+) -> (StatementResult, bool) {
     let started = Instant::now();
     let mut result = StatementResult {
         statement: sql.to_string(),
@@ -883,11 +901,7 @@ async fn run_statement(client: &mut RawClient, sql: &str, max_rows: usize) -> (S
     (result, broken)
 }
 
-type QueryOutcome = (
-    Option<Vec<ColumnMeta>>,
-    Vec<Vec<Value>>,
-    bool,
-);
+type QueryOutcome = (Option<Vec<ColumnMeta>>, Vec<Vec<Value>>, bool);
 
 async fn run_query_stream(
     client: &mut RawClient,
@@ -932,7 +946,11 @@ fn columns_of(columns: &[tiberius::Column]) -> Vec<ColumnMeta> {
 
 /// Drain every row of every result set of an introspection query. The
 /// descriptors' own bounds keep these small.
-async fn query_all(client: &mut RawClient, sql: &str, params: &[&dyn tiberius::ToSql]) -> Result<Vec<Row>> {
+async fn query_all(
+    client: &mut RawClient,
+    sql: &str,
+    params: &[&dyn tiberius::ToSql],
+) -> Result<Vec<Row>> {
     let mut stream = client
         .query(sql, params)
         .await
@@ -1088,8 +1106,8 @@ fn decode_cell(row: &Row, index: usize) -> Value {
             }
         }
         DatetimeOffsetn => {
-            if let Ok(Some(v)) =
-                row.try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::FixedOffset>, _>(
+            if let Ok(Some(v)) = row
+                .try_get::<sqlx::types::chrono::DateTime<sqlx::types::chrono::FixedOffset>, _>(
                     index,
                 )
             {
@@ -1247,7 +1265,10 @@ mod tests {
         let info = driver.test(&config).await.expect("server info");
         assert!(info.version.is_some(), "{:?}", info.version);
         assert!(info.version_number.is_some(), "{:?}", info.version_number);
-        assert!(info.supports_tls, "preferred must have encrypted the session");
+        assert!(
+            info.supports_tls,
+            "preferred must have encrypted the session"
+        );
 
         let connection = driver.connect(&config).await.expect("connect");
         connection.ping().await.expect("ping");
@@ -1358,32 +1379,55 @@ mod tests {
             .find(|db| db.name == "quarry_test")
             .expect("quarry_test");
         assert!(!quarry.is_system);
-        assert!(databases.iter().any(|db| db.name == "tempdb" && db.is_system));
+        assert!(databases
+            .iter()
+            .any(|db| db.name == "tempdb" && db.is_system));
 
         let namespaces = connection
             .list_namespaces("quarry_test")
             .await
             .expect("schemas");
-        assert!(namespaces.iter().any(|ns| ns.name == "dbo"), "{namespaces:?}");
+        assert!(
+            namespaces.iter().any(|ns| ns.name == "dbo"),
+            "{namespaces:?}"
+        );
         assert!(!namespaces.iter().any(|ns| ns.name == "INFORMATION_SCHEMA"));
 
         let objects = connection
             .list_objects("quarry_test", Some("dbo"))
             .await
             .expect("objects");
-        let items = objects.iter().find(|object| object.name == "items").expect("items");
-        assert_eq!(items.kind, ObjectKind::Table, "the CASE marker classifies as a table");
+        let items = objects
+            .iter()
+            .find(|object| object.name == "items")
+            .expect("items");
+        assert_eq!(
+            items.kind,
+            ObjectKind::Table,
+            "the CASE marker classifies as a table"
+        );
 
         let schema = connection
             .describe_object("quarry_test", Some("dbo"), "items")
             .await
             .expect("describe");
         assert_eq!(schema.kind, ObjectKind::Table);
-        let id = schema.columns.iter().find(|c| c.name == "id").expect("id column");
+        let id = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "id")
+            .expect("id column");
         assert!(id.is_primary_key, "the primary key comes from sys.indexes");
-        assert!(id.is_auto_increment, "IS_IDENTITY marks the identity column");
+        assert!(
+            id.is_auto_increment,
+            "IS_IDENTITY marks the identity column"
+        );
         assert_eq!(id.data_type, "int");
-        let price = schema.columns.iter().find(|c| c.name == "price").expect("price");
+        let price = schema
+            .columns
+            .iter()
+            .find(|c| c.name == "price")
+            .expect("price");
         assert!(price.nullable);
         assert!(!price.is_auto_increment);
 
@@ -1391,7 +1435,10 @@ mod tests {
             .list_table_columns("quarry_test", Some("dbo"))
             .await
             .expect("columns");
-        let items_columns = columns.iter().find(|entry| entry.table == "items").expect("items");
+        let items_columns = columns
+            .iter()
+            .find(|entry| entry.table == "items")
+            .expect("items");
         assert_eq!(items_columns.columns.len(), schema.columns.len());
 
         // A query against another database lands on its own pool and really

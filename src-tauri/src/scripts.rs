@@ -46,7 +46,11 @@ impl ScriptGrants {
     }
 
     fn path_of(&self, token: &str) -> Option<PathBuf> {
-        self.0.lock().expect("the grant table locks").get(token).cloned()
+        self.0
+            .lock()
+            .expect("the grant table locks")
+            .get(token)
+            .cloned()
     }
 }
 
@@ -115,7 +119,9 @@ async fn save_dialog(app: &AppHandle, file_name: String) -> CmdResult<Option<Pat
         .save_file(move |file: Option<FilePath>| {
             let _ = sender.send(file);
         });
-    let picked = receiver.await.map_err(|_| "the dialog was closed".to_string())?;
+    let picked = receiver
+        .await
+        .map_err(|_| "the dialog was closed".to_string())?;
     Ok(picked.and_then(|file: FilePath| file.into_path().ok()))
 }
 
