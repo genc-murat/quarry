@@ -58,6 +58,13 @@ jobs:
         with:
           workspaces: src-tauri
 
+      # `generate_context!` requires the `frontendDist` folder to exist even for
+      # a check or a test build, and `dist` is a build artefact the repository
+      # does not carry. An empty one satisfies the macro — debug builds embed no
+      # assets — and the real one is produced by the release workflow's own
+      # `npm run build`.
+      - run: mkdir -p dist
+
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --all --check
       # Lints are reported, not gated: the tree still carries a few pre-existing
       # ones, so `-D warnings` would fail every run until they are cleared.
