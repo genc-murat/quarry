@@ -25,6 +25,7 @@ import type {
   PartitionNode,
   PartitionPage,
   PartitionRequest,
+  PartitionTrace,
   QueryRequest,
   QueryResponse,
   RankCandidatesResponse,
@@ -274,6 +275,26 @@ function scriptResult(fixture: EngineFixture, request: QueryRequest): QueryRespo
   }
 }
 
+const CQL_DEMO_TRACE_IDS = [
+  "4c879bd0-64c9-49f5-b525-12d3072c9f8d",
+  "4c879bd0-64c9-49f5-b525-12d3072c9f8e",
+];
+
+function cqlDemoTrace(id: string): PartitionTrace {
+  const source = id === CQL_DEMO_TRACE_IDS[0] ? "127.0.0.1" : "127.0.0.2";
+  return {
+    status: "available",
+    id,
+    durationMicros: 451,
+    truncated: false,
+    events: [
+      { id: "execute", activity: "Execute CQL3 query", source, sourceElapsedMicros: 14, thread: null },
+      { id: "read", activity: "Reading partition rows", source, sourceElapsedMicros: 156, thread: null },
+      { id: "complete", activity: "Request complete", source, sourceElapsedMicros: 449, thread: null },
+    ],
+  };
+}
+
 function cqlResult(statement: string, rows: unknown[][], truncated: boolean): QueryResponse {
   return {
     results: [{ statement, isQuery: true, columns: CQL_DEMO_COLUMNS, rows, rowCount: rows.length, executionMs: 1, truncated }],
@@ -456,7 +477,17 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
           coordinator: replicas[offset === 0 ? 0 : 1],
           replicas: rows.length > 0 ? replicas : [],
         },
+        trace: request.trace ? (offset === 0
+          ? { status: "unavailable", id: CQL_DEMO_TRACE_IDS[0] }
+          : cqlDemoTrace(CQL_DEMO_TRACE_IDS[1])) : null,
       } satisfies PartitionPage);
+    }
+    case "fetch_partition_trace": {
+      const traceId = String(args?.traceId ?? "");
+      if (fixture.driver.id !== "cql" || !CQL_DEMO_TRACE_IDS.includes(traceId)) {
+        throw new Error("partition trace is unavailable");
+      }
+      return respond(cqlDemoTrace(traceId));
     }
     case "execute_query": {
       const request = (args?.request as QueryRequest) ?? { sql: "SELECT 1" };

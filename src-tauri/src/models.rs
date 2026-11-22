@@ -340,6 +340,8 @@ pub struct PartitionRequest {
     pub continuation: Option<String>,
     pub timeout_ms: Option<u64>,
     pub run_id: Option<String>,
+    #[serde(default)]
+    pub trace: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -348,6 +350,32 @@ pub struct PartitionPage {
     pub result: QueryResponse,
     pub continuation: Option<String>,
     pub diagnostics: PartitionDiagnostics,
+    pub trace: Option<PartitionTrace>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase", tag = "status")]
+pub enum PartitionTrace {
+    Available {
+        id: uuid::Uuid,
+        #[serde(rename = "durationMicros")]
+        duration_micros: Option<i32>,
+        events: Vec<PartitionTraceEvent>,
+        truncated: bool,
+    },
+    Unavailable {
+        id: Option<uuid::Uuid>,
+    },
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionTraceEvent {
+    pub id: String,
+    pub activity: Option<String>,
+    pub source: Option<String>,
+    pub source_elapsed_micros: Option<i32>,
+    pub thread: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

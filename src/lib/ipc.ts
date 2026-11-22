@@ -20,6 +20,7 @@ import type {
   OpenSessionRequest,
   PartitionPage,
   PartitionRequest,
+  PartitionTrace,
   QueryRequest,
   QueryResponse,
   RankCandidatesRequest,
@@ -114,6 +115,8 @@ export const ipc = {
     call<ColumnMeta[]>("partition_keys", { connectionId, database, table }),
   readPartition: (connectionId: string, request: PartitionRequest) =>
     call<PartitionPage>("read_partition", { connectionId, request }),
+  fetchPartitionTrace: (connectionId: string, traceId: string, runId: string) =>
+    call<PartitionTrace>("fetch_partition_trace", { connectionId, traceId, runId }),
 
   executeQuery: (connectionId: string, request: QueryRequest) =>
     call<QueryResponse>("execute_query", { connectionId, request }),

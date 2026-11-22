@@ -23,6 +23,7 @@ import type {
   DriverDescriptor,
   PartitionPage,
   PartitionRequest,
+  PartitionTrace,
   RankCandidatesRequest,
   RankCandidatesResponse,
   RiskVerdict,
@@ -963,14 +964,28 @@ test("CQL partition paging stays bound to its source connection", async (t) => {
   assert.ok(cql);
   const otherSession = { ...cql.session, id: "other-cql", profileId: "other-cql-profile", name: "Other CQL cluster" };
   const partitionKeys = [{ name: "region", dataType: "text" }, { name: "bucket", dataType: "int" }];
+  const traceRead = deferred<void>();
+  const lateTrace = deferred<PartitionTrace>();
+  const traceId = "04501c26-dbae-4b73-9479-ba520bfac787";
+  const availableTrace: PartitionTrace = {
+    status: "available", id: traceId, durationMicros: 830, truncated: false,
+    events: [{ id: "event-1", activity: "Reading rows", source: "10.0.0.2", sourceElapsedMicros: 40, thread: "shard 5" }],
+  };
+  let traceReads = 0;
+  let traceLookups = 0;
   const backend = installTestBackend({
     connect: () => ({ session: otherSession }),
     disconnect: () => undefined,
     list_databases: () => [],
     set_settings: () => undefined,
+    cancel_query: () => true,
+    fetch_partition_trace: () => ++traceLookups === 1 ? lateTrace.promise : availableTrace,
     partition_keys: () => partitionKeys,
     read_partition: (args) => {
-      const { continuation } = args?.request as PartitionRequest;
+      const { continuation, trace } = args?.request as PartitionRequest;
+      if (trace && ++traceReads === 1) {
+        return traceRead.promise.then(() => { throw new Error("timed out waiting for the partition page"); });
+      }
       const rows = continuation ? [["north", 24, 2]] : [["north", 24, 1]];
       const coordinator = {
         hostId: continuation ? "node2" : "node1",
@@ -987,6 +1002,7 @@ test("CQL partition paging stays bound to its source connection", async (t) => {
           coordinator,
           replicas: continuation ? [] : [coordinator],
         },
+        trace: trace ? { status: "unavailable", id: traceId } : null,
         result: { totalMs: 1, results: [{
           statement: "SELECT * FROM tracking.shipments WHERE region = ? AND bucket = ?",
           isQuery: true, columns: [...partitionKeys, { name: "sequence", dataType: "int" }],
@@ -1048,6 +1064,37 @@ test("CQL partition paging stays bound to its source connection", async (t) => {
     { keys: [{ column: "region", value: "north" }, { column: "bucket", value: "24" }], continuation: null },
     { keys: [{ column: "region", value: "north" }, { column: "bucket", value: "24" }], continuation: "next-token" },
   ]);
+  assert.ok(calls.every(({ trace }) => !trace));
+  await click(view, "Trace this read");
+  assert.ok(view.container.querySelector('button[title="Export CSV"]'));
+  assert.match(diagnostics?.textContent ?? "", /Waiting for trace/);
+  await act(async () => traceRead.resolve());
+  assert.match(diagnostics?.querySelector('[role="alert"]')?.textContent ?? "", /timed out waiting for the partition page/);
+  assert.ok(view.container.querySelector('button[title="Export CSV"]'));
+
+  await click(view, "Trace this read");
+  const traced = backend.argsFor("read_partition").at(-1);
+  assert.equal(traced?.connectionId, cql.session.id);
+  assert.equal((traced?.request as PartitionRequest).continuation, "next-token");
+  assert.equal((traced?.request as PartitionRequest).trace, true);
+  assert.match(diagnostics?.textContent ?? "", /Trace events are unavailable/);
+  assert.match(diagnostics?.textContent ?? "", new RegExp(traceId));
+  const readCount = backend.argsFor("read_partition").length;
+  await click(view, "Retry trace events");
+  assert.ok(view.container.querySelector('button[title="Export CSV"]'));
+  const pending = backend.argsFor("fetch_partition_trace").at(-1);
+  await click(view, "Stop waiting");
+  assert.deepEqual(backend.argsFor("cancel_query"), [{ runId: pending?.runId }]);
+  assert.match(diagnostics?.querySelector('[role="alert"]')?.textContent ?? "", /Stopped waiting for the trace/);
+  assert.ok(view.container.querySelector('button[title="Export CSV"]'));
+  await click(view, "Retry trace events");
+  await act(async () => lateTrace.resolve({ status: "unavailable", id: traceId }));
+  assert.equal(backend.argsFor("read_partition").length, readCount);
+  assert.deepEqual(backend.argsFor("fetch_partition_trace").map((args) => [args?.connectionId, args?.traceId]), [
+    [cql.session.id, traceId], [cql.session.id, traceId],
+  ]);
+  assert.match(diagnostics?.textContent ?? "", /Reading rows/);
+  assert.match(diagnostics?.textContent ?? "", /830 µs/);
 
   await click(view, "Analysis");
   const analysis = view.container.querySelector('[aria-label="Result analysis"]');

@@ -26,8 +26,9 @@ use crate::models::{
     ColumnMeta, ColumnSchema, ConfigField, ConnectionConfig, CreateTableRequest, DatabaseInfo,
     DatabaseObject, DriverCapabilities, DriverDescriptor, ForeignKeySchema, IndexSchema,
     InspectorSection, NamespaceInfo, ObjectAction, ObjectActionRequest, ObjectKind, ObjectSchema,
-    PartitionPage, PartitionRequest, QueryRequest, QueryResponse, RowChangeKind, RowChangeRequest,
-    SectionActionRequest, SectionRequest, ServerInfo, StatementResult, TableColumns,
+    PartitionPage, PartitionRequest, PartitionTrace, QueryRequest, QueryResponse, RowChangeKind,
+    RowChangeRequest, SectionActionRequest, SectionRequest, ServerInfo, StatementResult,
+    TableColumns,
 };
 
 const MAX_SAFE_JSON_INTEGER: i64 = 9_007_199_254_740_991;
@@ -217,6 +218,12 @@ pub trait Connection: Send + Sync {
     async fn read_partition(&self, _request: PartitionRequest) -> Result<PartitionPage> {
         Err(DriverError::Unsupported(
             "partition preview is unavailable".into(),
+        ))
+    }
+
+    async fn fetch_partition_trace(&self, _trace_id: uuid::Uuid) -> Result<PartitionTrace> {
+        Err(DriverError::Unsupported(
+            "partition tracing is unavailable".into(),
         ))
     }
 

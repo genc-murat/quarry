@@ -14,6 +14,7 @@ import type {
   OpenSessionRequest,
   PartitionDiagnostics,
   PartitionKeyValue,
+  PartitionTrace,
   QueryLanguage,
   QueryResponse,
   RowChangeRequest,
@@ -162,8 +163,12 @@ export interface QueryTab {
     keys: PartitionKeyValue[];
     pageSize: number;
     continuation: string | null;
+    pageCursor: string | null;
     offset: number;
     diagnostics?: PartitionDiagnostics;
+    trace?: PartitionTrace | null;
+    tracing?: boolean;
+    traceError?: string | null;
   };
   result: QueryResponse | null;
   resultSource: ResultSource | null;
@@ -359,7 +364,7 @@ interface WorkspaceState {
   saveRowChanges: (tabId: string, changes: RowChangeRequest[]) => Promise<RowSaveResult>;
   pageObjectData: (tabId: string, offset: number) => Promise<void>;
   openPartition: (ref: ObjectRef, keys: PartitionKeyValue[]) => void;
-  readPartitionPage: (tabId: string, next?: boolean) => Promise<void>;
+  readPartitionPage: (tabId: string, action?: "first" | "next" | "trace" | "retryTrace") => Promise<void>;
   createTable: (request: CreateTableRequest) => Promise<boolean>;
   persistSettings: () => void;
   openObjectDialog: (dialog: ObjectDialogRequest) => void;
@@ -1097,9 +1102,16 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
   cancelTab: async (id) => {
     const tab = get().tabs.find((t) => t.id === id);
     if (!tab?.running) return;
-    // Flip the UI immediately so Stop feels instant; the in-flight promise is
-    // ignored once `cancelled` is set.
-    get().updateTab(id, { cancelled: true, running: false });
+    if (tab.partition?.tracing) {
+      get().updateTab(id, {
+        partition: { ...tab.partition, tracing: false, traceError: "Stopped waiting for the trace." },
+        runId: null,
+        running: false,
+      });
+    } else {
+      // Flip the UI immediately and ignore the in-flight result.
+      get().updateTab(id, { cancelled: true, running: false });
+    }
     if (tab.runId) {
       try {
         await ipc.cancelQuery(tab.runId);
@@ -1219,43 +1231,65 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       sessionId: null,
       database: ref.database,
       objectRef: ref,
-      partition: { keys, pageSize, continuation: null, offset: 0 },
+      partition: { keys, pageSize, continuation: null, pageCursor: null, offset: 0 },
     });
     void get().readPartitionPage(tabId);
   },
 
-  readPartitionPage: async (tabId, next = false) => {
+  readPartitionPage: async (tabId, action = "first") => {
     const { tabs, sessions, settings } = get();
     const tab = tabs.find(({ id }) => id === tabId);
     if (!tab?.partition || !tab.objectRef || tab.running) return;
     const { partition, objectRef: ref } = tab;
-    if (next && !partition.continuation) return;
+    const tracing = action === "trace" || action === "retryTrace";
+    const traceId = action === "retryTrace" && partition.trace?.status === "unavailable"
+      ? partition.trace.id : null;
+    if (action === "next" && !partition.continuation) return;
+    if (action === "trace" && !tab.result) return;
+    if (action === "retryTrace" && !traceId) return;
+    const pageCursor = action === "next" ? partition.continuation : action === "trace" ? partition.pageCursor : null;
     const session = sessions.find(({ id }) => id === ref.sessionId);
     if (!session) {
-      get().updateTab(tabId, { error: "Reconnect and open the partition again." });
+      const error = "Reconnect and open the partition again.";
+      get().updateTab(tabId, tracing ? { partition: { ...partition, traceError: error } } : { error });
       return;
     }
     const runId = crypto.randomUUID();
-    get().updateTab(tabId, { runId, running: true, cancelled: false, error: null });
+    get().updateTab(tabId, tracing
+      ? { runId, running: true, partition: { ...partition, tracing: true, traceError: null } }
+      : { runId, running: true, cancelled: false, error: null });
     try {
-      const { result, continuation, diagnostics } = await ipc.readPartition(ref.sessionId, {
+      if (traceId) {
+        const trace = await ipc.fetchPartitionTrace(ref.sessionId, traceId, runId);
+        if (get().tabs.find(({ id }) => id === tabId)?.runId !== runId) return;
+        get().updateTab(tabId, {
+          partition: { ...partition, trace, tracing: false, traceError: null },
+          running: false,
+          runId: null,
+        });
+        return;
+      }
+      const { result, continuation, diagnostics, trace } = await ipc.readPartition(ref.sessionId, {
         database: ref.database,
         table: ref.object,
         keys: partition.keys,
         pageSize: partition.pageSize,
-        continuation: next ? partition.continuation : null,
+        continuation: pageCursor,
+        trace: action === "trace" || undefined,
         timeoutMs: settings.editor.timeoutMs || undefined,
         runId,
       });
       const current = get().tabs.find(({ id }) => id === tabId);
       if (current?.runId !== runId) return;
-      if (current.cancelled) {
+      if (current.cancelled && !tracing) {
         get().updateTab(tabId, { runId: null, running: false });
         return;
       }
-      const offset = next ? partition.offset + (tab.result?.results[0]?.rows.length ?? 0) : 0;
+      const offset = action === "first" ? 0 : partition.offset + (
+        action === "next" ? (tab.result?.results[0]?.rows.length ?? 0) : 0
+      );
       get().updateTab(tabId, {
-        partition: { ...partition, offset, continuation, diagnostics },
+        partition: { ...partition, offset, continuation, pageCursor, diagnostics, trace, tracing: false, traceError: null },
         result,
         resultSource: {
           title: tab.title,
@@ -1266,15 +1300,17 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
           partitionKeys: partition.keys,
         },
         error: null,
+        cancelled: false,
         running: false,
         runId: null,
       });
     } catch (error) {
       const current = get().tabs.find(({ id }) => id === tabId);
       if (current?.runId !== runId) return;
-      get().updateTab(tabId, {
-        error: current.cancelled ? null : errorMessage(error), running: false, runId: null,
-      });
+      const failure = tracing
+        ? { partition: { ...partition, tracing: false, traceError: errorMessage(error) } }
+        : { error: current.cancelled ? null : errorMessage(error) };
+      get().updateTab(tabId, { ...failure, running: false, runId: null });
     }
   },
 

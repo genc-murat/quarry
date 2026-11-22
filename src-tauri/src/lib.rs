@@ -104,6 +104,7 @@ pub fn run() {
             commands::list_table_columns,
             commands::partition_keys,
             commands::read_partition,
+            commands::fetch_partition_trace,
             commands::execute_query,
             commands::cancel_query,
             commands::explain_query,

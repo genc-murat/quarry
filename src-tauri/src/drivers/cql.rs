@@ -1,8 +1,9 @@
 //! Shared read-only CQL adapter for Apache Cassandra and ScyllaDB.
 use std::collections::VecDeque;
+use std::num::NonZeroU32;
 use std::ops::ControlFlow;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -31,15 +32,17 @@ use crate::models::{
     ColumnMeta, ColumnSchema, ConfigField, ConnectionConfig, DatabaseInfo, DatabaseObject,
     DriverCapabilities, FieldType, InspectorSection, NamespaceInfo, ObjectAction, ObjectKind,
     ObjectSchema, PartitionDiagnostics, PartitionKeyValue, PartitionNode, PartitionPage,
-    PartitionPlacement, PartitionRequest, QueryLanguage, QueryRequest, QueryResponse, ResultShape,
-    SectionBlock, SectionField, SectionSource, SelectOption, ServerInfo, SslMode, StatementResult,
-    TableColumns,
+    PartitionPlacement, PartitionRequest, PartitionTrace, PartitionTraceEvent, QueryLanguage,
+    QueryRequest, QueryResponse, ResultShape, SectionBlock, SectionField, SectionSource,
+    SelectOption, ServerInfo, SslMode, StatementResult, TableColumns,
 };
 
 const PORT: u16 = 9042;
 const MAX_SESSIONS: usize = 4;
 const MAX_CURSORS: usize = 128;
 const MAX_PAGE_SIZE: u32 = 1000;
+const TRACE_LOOKUP_TIMEOUT: Duration = Duration::from_secs(1);
+const MAX_TRACE_EVENTS: usize = 200;
 
 type KeyspaceSession = Arc<OnceCell<Arc<Session>>>;
 
@@ -236,6 +239,8 @@ impl Settings {
     async fn open(&self, keyspace: Option<&str>) -> Result<Session> {
         let mut builder = SessionBuilder::new()
             .known_nodes(&self.addresses)
+            .tracing_info_fetch_attempts(NonZeroU32::new(12).unwrap())
+            .tracing_info_fetch_interval(Duration::from_millis(40))
             .tls_context(self.tls.clone());
         if let Some((user, password)) = &self.credentials {
             builder = builder.user(user, password);
@@ -388,6 +393,38 @@ fn partition_diagnostics(
 }
 
 impl CqlConnection {
+    async fn partition_trace(&self, id: Option<Uuid>, budget: Duration) -> PartitionTrace {
+        let Some(id) = id else {
+            return PartitionTrace::Unavailable { id: None };
+        };
+        if budget.is_zero() {
+            return PartitionTrace::Unavailable { id: Some(id) };
+        }
+        let Ok(Ok(mut trace)) =
+            tokio::time::timeout(budget, self.session.get_tracing_info(&id)).await
+        else {
+            return PartitionTrace::Unavailable { id: Some(id) };
+        };
+        trace.events.sort_by_key(|event| event.event_id);
+        PartitionTrace::Available {
+            id,
+            duration_micros: trace.duration,
+            truncated: trace.events.len() > MAX_TRACE_EVENTS,
+            events: trace
+                .events
+                .into_iter()
+                .take(MAX_TRACE_EVENTS)
+                .map(|event| PartitionTraceEvent {
+                    id: event.event_id.to_string(),
+                    activity: event.activity,
+                    source: event.source.map(|source| source.to_string()),
+                    source_elapsed_micros: event.source_elapsed,
+                    thread: event.thread,
+                })
+                .collect(),
+        }
+    }
+
     async fn session_for(&self, keyspace: Option<&str>) -> Result<Arc<Session>> {
         let Some(keyspace) = keyspace.filter(|name| !name.is_empty()) else {
             return Ok(self.session.clone());
@@ -756,7 +793,8 @@ impl Connection for CqlConnection {
             prepared.set_page_size(page_size as i32);
             (prepared, PagingState::start())
         };
-        let bound = prepared.bind(&values).map_err(query_error)?;
+        let mut bound = prepared.clone().bind(&values).map_err(query_error)?;
+        bound.set_tracing(request.trace);
         let token = bound.calculate_token().ok().flatten();
         let (page, next) = self
             .session
@@ -770,6 +808,7 @@ impl Connection for CqlConnection {
             page.request_coordinator(),
         );
         let page = page.into_rows_result().map_err(query_error)?;
+        let trace_id = page.tracing_id();
         let columns = page
             .column_specs()
             .iter()
@@ -802,7 +841,7 @@ impl Connection for CqlConnection {
                     PartitionCursor {
                         selection,
                         state,
-                        prepared: bound.prepared().clone(),
+                        prepared,
                     },
                 ));
                 if cursors.len() > MAX_CURSORS {
@@ -811,11 +850,29 @@ impl Connection for CqlConnection {
                 Some(id)
             }
         };
+        let trace = if request.trace {
+            let budget = request.timeout_ms.map_or(TRACE_LOOKUP_TIMEOUT, |ms| {
+                Duration::from_millis(ms)
+                    .saturating_sub(started.elapsed())
+                    .saturating_sub(Duration::from_millis(10))
+                    .min(TRACE_LOOKUP_TIMEOUT)
+            });
+            Some(self.partition_trace(trace_id, budget).await)
+        } else {
+            None
+        };
         Ok(PartitionPage {
             result,
             continuation,
             diagnostics,
+            trace,
         })
+    }
+
+    async fn fetch_partition_trace(&self, trace_id: Uuid) -> Result<PartitionTrace> {
+        Ok(self
+            .partition_trace(Some(trace_id), TRACE_LOOKUP_TIMEOUT)
+            .await)
     }
 
     async fn execute(&self, request: QueryRequest) -> Result<QueryResponse> {
@@ -1272,6 +1329,7 @@ mod tests {
                     continuation: None,
                     timeout_ms: None,
                     run_id: None,
+                    trace: false,
                 })
                 .await
                 .unwrap();
@@ -1308,6 +1366,7 @@ mod tests {
             continuation: None,
             timeout_ms: None,
             run_id: None,
+            trace: false,
         };
         let (server_token,) = seed
             .query_unpaged(
@@ -1321,6 +1380,7 @@ mod tests {
             .single_row::<(i64,)>()
             .unwrap();
         let initial = conn.read_partition(request.clone()).await.unwrap();
+        assert!(initial.trace.is_none());
         let token = Some(server_token.to_string());
         assert_eq!(initial.diagnostics.token, token);
         let coordinator = &initial.diagnostics.coordinator;
@@ -1340,6 +1400,28 @@ mod tests {
             assert_eq!(replica.shard.is_some(), test_tablets);
         }
         if test_tablets {
+            let (table_id,) = seed
+                .query_unpaged(
+                    "SELECT id FROM system_schema.tables WHERE keyspace_name = ? AND table_name = ?",
+                    (&second, "events"),
+                )
+                .await
+                .unwrap()
+                .into_rows_result()
+                .unwrap()
+                .single_row::<(Uuid,)>()
+                .unwrap();
+            let (server_replicas,) = seed
+                .query_unpaged(
+                    "SELECT replicas FROM system.tablets WHERE table_id = ? AND last_token >= ? LIMIT 1",
+                    (table_id, server_token),
+                )
+                .await
+                .unwrap()
+                .into_rows_result()
+                .unwrap()
+                .single_row::<(Vec<(Uuid, i32)>,)>()
+                .unwrap();
             let mut tablet_request = request.clone();
             tablet_request.database = second.clone();
             let mut tablet_page = conn.read_partition(tablet_request.clone()).await.unwrap();
@@ -1359,9 +1441,14 @@ mod tests {
             );
             assert_eq!(tablet_page.diagnostics.coordinator.host_id, host_id);
             assert!(tablet_page.diagnostics.coordinator.shard.is_some());
-            assert_eq!(tablet_page.diagnostics.replicas.len(), 1);
-            assert_eq!(tablet_page.diagnostics.replicas[0].host_id, host_id);
-            assert!(tablet_page.diagnostics.replicas[0].shard.is_some());
+            let known_replicas = tablet_page
+                .diagnostics
+                .replicas
+                .iter()
+                .map(|replica| (replica.host_id, replica.shard.unwrap() as i32))
+                .collect::<Vec<_>>();
+            assert!(!server_replicas.is_empty());
+            assert_eq!(known_replicas, server_replicas);
         }
         assert!(initial.result.results[0]
             .columns
@@ -1384,18 +1471,32 @@ mod tests {
             next.result.results[0].rows[0][sequence],
             json!("9007199254740994")
         );
-        let retry = conn.read_partition(request.clone()).await.unwrap();
+        let mut trace_request = request.clone();
+        trace_request.trace = true;
+        // Expire only the event lookup budget after obtaining the page and trace ID.
+        trace_request.timeout_ms = Some(0);
+        let retry = conn.read_partition(trace_request).await.unwrap();
         assert_eq!(retry.result.results[0].rows, next.result.results[0].rows);
-        request.continuation = next.continuation;
+        let Some(PartitionTrace::Unavailable { id: Some(trace_id) }) = retry.trace else {
+            panic!(
+                "expected a trace ID for delayed events, got {:?}",
+                retry.trace
+            );
+        };
+        let fetched = conn.fetch_partition_trace(trace_id).await.unwrap();
+        let PartitionTrace::Available { id, events, .. } = fetched else {
+            panic!("expected trace events after retrying the same ID, got {fetched:?}",);
+        };
+        assert_eq!(id, trace_id);
+        assert!(!events.is_empty());
+        assert!(events
+            .iter()
+            .any(|event| event.source.is_some() && event.activity.is_some()));
+        request.continuation = retry.continuation;
         if request.continuation.is_some() {
-            assert!(conn
-                .read_partition(request.clone())
-                .await
-                .unwrap()
-                .result
-                .results[0]
-                .rows
-                .is_empty());
+            let end = conn.read_partition(request.clone()).await.unwrap();
+            assert!(end.result.results[0].rows.is_empty());
+            assert!(end.trace.is_none());
         }
         request.continuation = None;
         request.keys[0].value = "absent".into();

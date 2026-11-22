@@ -19,7 +19,7 @@ use crate::models::{
     ConnectResult, ConnectionConfig, ConnectionProfile, CreateTableRequest, DatabaseInfo,
     DatabaseObject, DriverDescriptor, InspectorSection, NamespaceInfo, ObjectAction,
     ObjectActionRequest, ObjectDetail, ObjectKind, ObjectSchema, OpenSessionRequest, PartitionPage,
-    PartitionRequest, QueryRequest, QueryResponse, RowChangeKind, RowChangeRequest,
+    PartitionRequest, PartitionTrace, QueryRequest, QueryResponse, RowChangeKind, RowChangeRequest,
     SectionActionRequest, SectionRequest, ServerInfo, SessionInfo, Snippet, SslMode, TableColumns,
 };
 use crate::session::SessionEntry;
@@ -343,6 +343,23 @@ pub async fn read_partition(
     if let Some(id) = run_id.as_deref() {
         state.running.finish(id);
     }
+    result.map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn fetch_partition_trace(
+    state: State<'_, AppState>,
+    connection_id: String,
+    trace_id: uuid::Uuid,
+    run_id: String,
+) -> CmdResult<PartitionTrace> {
+    let conn = connection(&state, &connection_id).await?;
+    let cancel = state.running.register(&run_id);
+    let result = tokio::select! {
+        _ = cancel.cancelled() => Err(DriverError::Cancelled("stopped waiting for the trace".into())),
+        result = conn.fetch_partition_trace(trace_id) => result,
+    };
+    state.running.finish(&run_id);
     result.map_err(Into::into)
 }
 

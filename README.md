@@ -662,6 +662,10 @@ bundle it found in the target directory before it exits.
 - Expand **Partition diagnostics** to see the partition token, the last page's coordinator,
   and the replicas known to the driver. ScyllaDB shows shard numbers when available and identifies
   tablet placement from the driver's metadata.
+- Select **Trace this read** inside the panel to repeat the current page with CQL tracing and see
+  server events with their source nodes and elapsed times. The connection needs access to the
+  server's trace tables to show those events. If events are delayed, **Retry trace events** looks up
+  the same trace ID.
 - The first release covers reads and generic CSV/JSON result exports. The partition form supports
   scalar keys, including UUIDs and exact decimals. Use the CQL editor for composite value types
   such as frozen collections. The demo uses `tracking.shipments` with region `north` and month

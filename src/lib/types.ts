@@ -338,12 +338,26 @@ export interface PartitionRequest {
   continuation: string | null;
   timeoutMs?: number;
   runId?: string;
+  trace?: boolean;
 }
 
 export interface PartitionPage {
   result: QueryResponse;
   continuation: string | null;
   diagnostics: PartitionDiagnostics;
+  trace: PartitionTrace | null;
+}
+
+export type PartitionTrace =
+  | { status: "available"; id: string; durationMicros: number | null; events: PartitionTraceEvent[]; truncated: boolean }
+  | { status: "unavailable"; id: string | null };
+
+export interface PartitionTraceEvent {
+  id: string;
+  activity: string | null;
+  source: string | null;
+  sourceElapsedMicros: number | null;
+  thread: string | null;
 }
 
 export interface PartitionDiagnostics {

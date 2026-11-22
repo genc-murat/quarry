@@ -733,7 +733,7 @@ export function QueryWorkspace() {
               <Button size="xs" variant="outline" onClick={() => void cancelTab(tab.id)}>Stop waiting</Button>
             ) : (
               <Button size="xs" variant="outline" disabled={!partition.continuation || !session}
-                onClick={() => void readPartitionPage(tab.id, true)}>Next page</Button>
+                onClick={() => void readPartitionPage(tab.id, "next")}>Next page</Button>
             )}
             {tab.error || tab.cancelled || (missingTabletPlacement && partition.offset === 0 && !partition.continuation) ? (
               <Button size="xs" variant="ghost" disabled={tab.running || !session} onClick={() => void readPartitionPage(tab.id)}>Reload partition</Button>
@@ -747,9 +747,14 @@ export function QueryWorkspace() {
             {rowCount ? <span className="ml-auto tabular-nums">{partition.offset + 1}–{partition.offset + rowCount}</span> : null}
           </div>
         </div>
-        {partition.diagnostics ? <PartitionDiagnosticsPanel key={tab.id} diagnostics={partition.diagnostics} /> : null}
+        {partition.diagnostics ? (
+          <PartitionDiagnosticsPanel key={tab.id} diagnostics={partition.diagnostics} trace={partition.trace}
+            tracing={partition.tracing} traceError={partition.traceError} traceDisabled={!session || tab.running}
+            onTrace={() => void readPartitionPage(tab.id, "trace")}
+            onRetryTrace={() => void readPartitionPage(tab.id, "retryTrace")} />
+        ) : null}
         <div className="min-h-0 flex-1">
-          <ResultsGrid result={tab.result} error={tab.error} running={tab.running} cancelled={tab.cancelled}
+          <ResultsGrid result={tab.result} error={tab.error} running={tab.running && !partition.tracing} cancelled={tab.cancelled}
             cancelledMessage={stoppedWaiting}
             onAnalyze={(result, trigger) => setAnalysis({ sample: { result, source: tab.resultSource }, trigger })} />
         </div>
