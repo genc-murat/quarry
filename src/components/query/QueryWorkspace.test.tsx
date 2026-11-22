@@ -12,12 +12,16 @@ import { EditorView } from "@codemirror/view";
 import { act } from "react";
 
 import { QueryWorkspace } from "./QueryWorkspace.tsx";
+import { StatusBar } from "@/components/layout/StatusBar.tsx";
+import { ObjectDialogHost } from "@/components/objects/ObjectDialogHost.tsx";
+import { FIXTURES } from "@/lib/mockFixtures.ts";
 import { SETTLE_MS } from "@/lib/rankCache.ts";
 import { mergeSettings } from "@/lib/settings.ts";
 import { installTestBackend, type TestBackend } from "@/lib/testBackend.ts";
 import { click, closeDom, mount, type MountedComponent } from "@/lib/testRender.tsx";
 import type {
   DriverDescriptor,
+  PartitionRequest,
   RankCandidatesRequest,
   RankCandidatesResponse,
   RiskVerdict,
@@ -951,4 +955,83 @@ test("a captured result survives closing its tab and compares with the selected 
   });
   assert.match(comparison.textContent ?? "", /1 → 0/);
   assert.equal(backend.argsFor("execute_query").length, 2);
+});
+
+test("CQL partition paging stays bound to its source connection", async (t) => {
+  const cql = FIXTURES.find(({ driver }) => driver.id === "cql");
+  assert.ok(cql);
+  const otherSession = { ...cql.session, id: "other-cql", profileId: "other-cql-profile", name: "Other CQL cluster" };
+  const partitionKeys = [{ name: "region", dataType: "text" }, { name: "bucket", dataType: "int" }];
+  const backend = installTestBackend({
+    connect: () => ({ session: otherSession }),
+    disconnect: () => undefined,
+    list_databases: () => [],
+    set_settings: () => undefined,
+    partition_keys: () => partitionKeys,
+    read_partition: (args) => {
+      const { continuation } = args?.request as PartitionRequest;
+      const rows = continuation ? [["north", 24, 2]] : [["north", 24, 1]];
+      return {
+        continuation: continuation ? "third-token" : "next-token",
+        result: { totalMs: 1, results: [{
+          statement: "SELECT * FROM tracking.shipments WHERE region = ? AND bucket = ?",
+          isQuery: true, columns: [...partitionKeys, { name: "sequence", dataType: "int" }],
+          rows, rowCount: rows.length, executionMs: 1, truncated: false,
+        }] },
+      };
+    },
+  });
+  seed();
+  useWorkspace.setState({
+    drivers: [cql.driver], sessions: [cql.session], activeSessionId: cql.session.id,
+    columnsCache: { [`${cql.session.id}||tracking`]: [] },
+  });
+  const view = await mount(<><QueryWorkspace /><ObjectDialogHost /><StatusBar /></>);
+  t.after(view.unmount);
+  cleanup(t, backend);
+
+  await act(async () => useWorkspace.getState().openObjectData({
+    sessionId: cql.session.id, database: "tracking", namespace: null, object: "shipments", objectKind: "table",
+  }));
+  const inputs = [...view.container.querySelectorAll<HTMLInputElement>('[aria-label="Open partition"] input')];
+  assert.equal(inputs.length, 2);
+  await act(async () => {
+    for (const [index, value] of ["north", "24"].entries()) {
+      const input = inputs[index];
+      Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set?.call(input, value);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  });
+  await click(view, "Read partition");
+  await act(async () => {
+    const workspace = useWorkspace.getState();
+    await workspace.connect({ profileId: otherSession.profileId }, otherSession.name);
+    workspace.setActiveSession(cql.session.id);
+    workspace.setActiveSession(otherSession.id);
+  });
+  const { tabs, activeTabId, activeSessionId } = useWorkspace.getState();
+  assert.equal(activeSessionId, otherSession.id);
+  assert.equal(tabs.find(({ id }) => id === activeTabId)?.sessionId, null);
+  assert.match(view.container.querySelector("footer")?.textContent ?? "", new RegExp(cql.session.name));
+  await click(view, "Next page");
+  assert.deepEqual(backend.argsFor("read_partition").map((args) => args?.connectionId), [cql.session.id, cql.session.id]);
+  const calls = backend.argsFor("read_partition").map((args) => args?.request as PartitionRequest);
+  assert.deepEqual(calls.map(({ keys, continuation }) => ({ keys, continuation })), [
+    { keys: [{ column: "region", value: "north" }, { column: "bucket", value: "24" }], continuation: null },
+    { keys: [{ column: "region", value: "north" }, { column: "bucket", value: "24" }], continuation: "next-token" },
+  ]);
+
+  await click(view, "Analysis");
+  const analysis = view.container.querySelector('[aria-label="Result analysis"]');
+  assert.match(analysis?.textContent ?? "", /Partition page · offset 1/);
+  assert.match(analysis?.textContent ?? "", /region = "north"/);
+  assert.equal(backend.argsFor("execute_query").length, 0);
+
+  await act(async () => analysis?.querySelector<HTMLButtonElement>('[aria-label="Close"]')?.click());
+  const next = [...view.container.querySelectorAll("button")].find((button) => button.textContent === "Next page");
+  assert.equal(next?.disabled, false);
+  await act(async () => useWorkspace.getState().disconnect(cql.session.id));
+  assert.equal(next?.disabled, true);
+  assert.match(view.container.textContent ?? "", /Reconnect and open the partition again/);
+  assert.match(view.container.querySelector("footer")?.textContent ?? "", /No connection/);
 });

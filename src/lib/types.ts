@@ -6,7 +6,7 @@
  */
 
 export type SslMode = "disabled" | "preferred" | "required";
-export type QueryLanguage = "sql" | "redis" | "mongo" | "http" | "none";
+export type QueryLanguage = "sql" | "cql" | "redis" | "mongo" | "http" | "none";
 export type ResultShape = "tabular" | "document" | "keyValue";
 export type ObjectKind =
   | "table"
@@ -281,6 +281,7 @@ export interface ObjectSchema {
 export interface ColumnMeta {
   name: string;
   dataType?: string | null;
+  compareAsDecimal?: boolean;
 }
 
 export interface StatementResult {
@@ -322,6 +323,26 @@ export interface QueryRequest {
   timeoutMs?: number | null;
   /** Caller-generated id, used to cancel the run via `cancelQuery`. */
   runId?: string | null;
+}
+
+export interface PartitionKeyValue {
+  column: string;
+  value: string;
+}
+
+export interface PartitionRequest {
+  database: string;
+  table: string;
+  keys: PartitionKeyValue[];
+  pageSize: number;
+  continuation: string | null;
+  timeoutMs?: number;
+  runId?: string;
+}
+
+export interface PartitionPage {
+  result: QueryResponse;
+  continuation: string | null;
 }
 
 export interface ColumnDefinition {

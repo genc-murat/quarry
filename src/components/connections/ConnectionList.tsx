@@ -96,7 +96,7 @@ export function ConnectionList() {
       const path = profile.options?.path;
       return typeof path === "string" && path ? path : (driver?.displayName ?? profile.driver);
     }
-    return `${profile.username}@${profile.host}:${profile.port}${
+    return `${profile.username ? `${profile.username}@` : ""}${profile.host}:${profile.port}${
       profile.database ? `/${profile.database}` : ""
     }`;
   };
@@ -105,16 +105,17 @@ export function ConnectionList() {
   // without a connection (it is just a file); a console needs an open one.
   const connectionMenu = (profile: ConnectionProfile): MenuEntry[] => {
     const session = sessionForProfile(profile.id);
+    const cql = drivers.find(({ id }) => id === profile.driver)?.capabilities.queryLanguage === "cql";
     return [
       { type: "label", label: profile.name },
-      { type: "label", label: "SQL editor" },
-      {
+      { type: "label", label: cql ? "CQL editor" : "SQL editor" },
+      ...(!cql ? [{
         label: "New SQL script",
         icon: <FilePlus className="h-3.5 w-3.5" />,
         onSelect: () => void newScript(session?.id ?? null),
-      },
+      }] : []),
       {
-        label: "Open SQL console",
+        label: cql ? "Open CQL console" : "Open SQL console",
         icon: <Terminal className="h-3.5 w-3.5" />,
         disabled: !session,
         hint: session ? undefined : "connect first",

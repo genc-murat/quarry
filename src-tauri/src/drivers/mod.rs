@@ -6,6 +6,7 @@
 //! the IPC layer or the frontend are required.
 
 pub mod clickhouse;
+pub mod cql;
 pub mod mongo;
 pub mod mssql;
 pub mod mysql;
@@ -25,8 +26,8 @@ use crate::models::{
     ColumnMeta, ColumnSchema, ConfigField, ConnectionConfig, CreateTableRequest, DatabaseInfo,
     DatabaseObject, DriverCapabilities, DriverDescriptor, ForeignKeySchema, IndexSchema,
     InspectorSection, NamespaceInfo, ObjectAction, ObjectActionRequest, ObjectKind, ObjectSchema,
-    QueryRequest, QueryResponse, RowChangeKind, RowChangeRequest, SectionActionRequest,
-    SectionRequest, ServerInfo, StatementResult, TableColumns,
+    PartitionPage, PartitionRequest, QueryRequest, QueryResponse, RowChangeKind, RowChangeRequest,
+    SectionActionRequest, SectionRequest, ServerInfo, StatementResult, TableColumns,
 };
 
 const MAX_SAFE_JSON_INTEGER: i64 = 9_007_199_254_740_991;
@@ -197,6 +198,7 @@ pub trait Connection: Send + Sync {
                     .map(|c| ColumnMeta {
                         name: c.name,
                         data_type: Some(c.data_type),
+                        compare_as_decimal: false,
                     })
                     .collect(),
             });
@@ -205,6 +207,18 @@ pub trait Connection: Send + Sync {
     }
 
     async fn execute(&self, request: QueryRequest) -> Result<QueryResponse>;
+
+    async fn partition_keys(&self, _database: &str, _table: &str) -> Result<Vec<ColumnMeta>> {
+        Err(DriverError::Unsupported(
+            "partition preview is unavailable".into(),
+        ))
+    }
+
+    async fn read_partition(&self, _request: PartitionRequest) -> Result<PartitionPage> {
+        Err(DriverError::Unsupported(
+            "partition preview is unavailable".into(),
+        ))
+    }
 
     /// Execute with the option to be interrupted. The default implementation
     /// ignores `cancel` and delegates to [`Connection::execute`]; SQL adapters
@@ -455,6 +469,7 @@ impl DriverRegistry {
             drivers: BTreeMap::new(),
         };
         registry.register(Arc::new(clickhouse::ClickHouseDriver::new()));
+        registry.register(Arc::new(cql::CqlDriver));
         registry.register(Arc::new(mongo::MongoDriver::new()));
         registry.register(Arc::new(mssql::MssqlDriver::new()));
         registry.register(Arc::new(mysql::MySqlDriver::new()));

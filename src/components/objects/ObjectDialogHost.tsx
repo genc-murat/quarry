@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { ColumnDialog } from "@/components/objects/ColumnDialog";
 import { ExportDialog } from "@/components/objects/ExportDialog";
 import { IndexDialog } from "@/components/objects/IndexDialog";
+import { PartitionDialog } from "@/components/objects/PartitionDialog";
 import { ConfirmDialog } from "@/components/ui/confirm-dialog";
 import { PromptDialog } from "@/components/ui/prompt-dialog";
 import { dialectForDriver, objectKey, quoteIdentifier } from "@/lib/objects";
@@ -56,6 +57,8 @@ export function ObjectDialogHost() {
   }
 
   switch (dialog.kind) {
+    case "partition":
+      return <PartitionDialog key={objectKey(ref)} objectRef={ref} onClose={close} />;
     case "index":
       if (!detail) return null;
       return (

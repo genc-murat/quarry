@@ -119,7 +119,7 @@ export type TemplateKind = "select" | "insert" | "update" | "delete";
 
 /** A request to open one of the shared object dialogs (hosted globally). */
 export type ObjectDialogRequest =
-  | { ref: ObjectRef; kind: "index" }
+  | { ref: ObjectRef; kind: "partition" | "index" }
   | { ref: ObjectRef; kind: "addColumn" }
   | { ref: ObjectRef; kind: "alterColumn"; column: ColumnSchema }
   | { ref: ObjectRef; kind: "export" }

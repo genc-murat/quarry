@@ -1,4 +1,4 @@
-import type { StatementResult } from "@/lib/types";
+import type { PartitionKeyValue, StatementResult } from "@/lib/types";
 
 export const MAX_RESULT_CELLS = 250_000;
 export const MAX_RESULT_SNAPSHOTS = 8;
@@ -10,6 +10,7 @@ export interface ResultSource {
   database: string | null;
   completedAt: number;
   preview: { limit: number; offset: number } | null;
+  partitionKeys?: PartitionKeyValue[];
 }
 
 export interface ResultSample {
@@ -49,6 +50,20 @@ function valueKey(value: unknown): string {
   });
 }
 
+function comparableValue(value: unknown, compareAsDecimal?: boolean): unknown {
+  if (!compareAsDecimal || typeof value !== "string") return value;
+  const decimal = /^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(value);
+  if (!decimal) return value;
+  const [, sign, integer, fraction = "", exponent = "0"] = decimal;
+  if (!integer && !fraction) return value;
+
+  const digits = (integer + fraction).replace(/^0+/, "");
+  if (!digits) return "0";
+  const coefficient = digits.replace(/0+$/, "");
+  const power = BigInt(exponent) - BigInt(fraction.length) + BigInt(digits.length - coefficient.length);
+  return `${sign === "-" ? "-" : ""}${coefficient}e${power}`;
+}
+
 export interface ColumnProfile {
   nulls: number;
   blanks: number;
@@ -59,7 +74,7 @@ export interface ColumnProfile {
 const isBlank = (value: unknown) => typeof value === "string" && value.trim() === "";
 
 export function profileResult(result: StatementResult): ColumnProfile[] {
-  return result.columns.map((_, index) => {
+  return result.columns.map(({ compareAsDecimal }, index) => {
     const counts = new Map<string, number>();
     let nulls = 0;
     let blanks = 0;
@@ -70,7 +85,7 @@ export function profileResult(result: StatementResult): ColumnProfile[] {
         nulls += 1;
       } else {
         if (isBlank(value)) blanks += 1;
-        const key = valueKey(value);
+        const key = valueKey(comparableValue(value, compareAsDecimal));
         const count = counts.get(key) ?? 0;
         if (count === 1) repeats += 2;
         else if (count > 1) repeats += 1;
@@ -85,10 +100,12 @@ export type ProfileFilter = "nulls" | "blanks" | "repeats";
 
 export function profileRows(result: StatementResult, column: number, filter: ProfileFilter) {
   const counts = new Map<string, number>();
+  const compareAsDecimal = result.columns[column]?.compareAsDecimal;
+  const cellKey = (value: unknown) => valueKey(comparableValue(value, compareAsDecimal));
   if (filter === "repeats") {
     for (const row of result.rows) {
       if (row[column] == null) continue;
-      const key = valueKey(row[column]);
+      const key = cellKey(row[column]);
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
   }
@@ -98,7 +115,7 @@ export function profileRows(result: StatementResult, column: number, filter: Pro
       ? value == null
       : filter === "blanks"
         ? isBlank(value)
-        : (counts.get(valueKey(value)) ?? 0) > 1;
+        : (counts.get(cellKey(value)) ?? 0) > 1;
     return matches ? [{ row: index + 1, value }] : [];
   });
 }
@@ -110,15 +127,20 @@ export function alignResultColumns(before: StatementResult, after: StatementResu
   const beforeUnknown = before.columns.length === 0 && before.rows.length === 0;
   const afterUnknown = after.columns.length === 0 && after.rows.length === 0;
   const inferred = beforeUnknown || afterUnknown;
-  const shared = before.columns.flatMap(({ name }, index) => {
+  const shared = before.columns.flatMap(({ name, compareAsDecimal }, index) => {
     const afterIndex = afterIndexes.get(name);
-    return afterIndex === undefined ? [] : [{ name, before: index, after: afterIndex }];
+    return afterIndex === undefined ? [] : [{
+      name,
+      before: index,
+      after: afterIndex,
+      compareAsDecimal: !!compareAsDecimal && !!after.columns[afterIndex].compareAsDecimal,
+    }];
   });
   return {
     ambiguous,
     inferred,
     shared: inferred
-      ? (beforeUnknown ? after : before).columns.map(({ name }, index) => ({ name, before: index, after: index }))
+      ? (beforeUnknown ? after : before).columns.map(({ name }, index) => ({ name, before: index, after: index, compareAsDecimal: false }))
       : shared,
     onlyBefore: inferred ? [] : before.columns.filter(({ name }) => !afterIndexes.has(name)).map(({ name }) => name),
     onlyAfter: inferred ? [] : after.columns.filter(({ name }) => !beforeNames.has(name)).map(({ name }) => name),
@@ -154,7 +176,7 @@ export function compareResults(
   const keyed = keyNames.length > 0;
   if (keyed && keys.length !== keyNames.length) return { error: "Choose key columns shared by both results." };
   const project = (row: unknown[], columns: typeof shared, side: "before" | "after") =>
-    columns.map((column) => row[column[side]] ?? null);
+    columns.map((column) => comparableValue(row[column[side]] ?? null, column.compareAsDecimal));
   const keyError = (side: "Before" | "After", issue: string) => ({
     error: `${side} contains ${issue} keys. Choose columns whose combined values are unique and non-NULL on both sides.`,
   });
@@ -191,7 +213,9 @@ export function compareResults(
     }
 
     const fields = keyed
-      ? shared.filter((column) => valueKey(previous[column.before]) !== valueKey(row[column.after]))
+      ? shared.filter(({ before, after, compareAsDecimal }) =>
+        valueKey(comparableValue(previous[before], compareAsDecimal)) !==
+        valueKey(comparableValue(row[after], compareAsDecimal)))
         .map(({ name }) => name)
       : [];
     if (fields.length) {

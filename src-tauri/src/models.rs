@@ -71,6 +71,7 @@ pub struct ConnectionProfile {
 #[serde(rename_all = "camelCase")]
 pub enum QueryLanguage {
     Sql,
+    Cql,
     Redis,
     Mongo,
     Http,
@@ -322,12 +323,40 @@ pub struct QueryRequest {
     pub run_id: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionKeyValue {
+    pub column: String,
+    pub value: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionRequest {
+    pub database: String,
+    pub table: String,
+    pub keys: Vec<PartitionKeyValue>,
+    pub page_size: u32,
+    pub continuation: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub run_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionPage {
+    pub result: QueryResponse,
+    pub continuation: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ColumnMeta {
     pub name: String,
     #[serde(default)]
     pub data_type: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub compare_as_decimal: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

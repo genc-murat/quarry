@@ -552,6 +552,7 @@ impl Connection for MySqlConnection {
             let column = ColumnMeta {
                 name: row.try_get("COLUMN_NAME").unwrap_or_default(),
                 data_type: row.try_get("DATA_TYPE").ok(),
+                compare_as_decimal: false,
             };
             match out.last_mut() {
                 Some(entry) if entry.table == table => entry.columns.push(column),
@@ -740,6 +741,7 @@ async fn run_statement(
                 .map(|c| ColumnMeta {
                     name: c.name().to_string(),
                     data_type: Some(c.type_info().name().to_string()),
+                    compare_as_decimal: false,
                 })
                 .collect();
 

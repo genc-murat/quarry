@@ -244,7 +244,7 @@ test("only the engine that declares inspector sections answers the section comma
       namespace: namespaceOf(fixture),
       object: fixture.objects[0].name,
     });
-    assert.deepEqual(other.sections, [], fixture.driver.id);
+    assert.deepEqual(other.sections.map(({ id }) => id), fixture.driver.id === "cql" ? ["cql-keys"] : [], fixture.driver.id);
     await assert.rejects(
       () =>
         call<InspectorSection>("object_section", {
@@ -289,6 +289,8 @@ test("generated DDL is quoted in the engine's own dialect", async () => {
         detail.ddl.includes(`${open}${object.name}${close}`),
         `${fixture.driver.id} did not quote ${object.name}: ${detail.ddl.split("\n")[0]}`,
       );
+    } else if (fixture.driver.id === "cql") {
+      assert.equal(detail.ddl, "");
     } else {
       // Redis and MongoDB have no DDL to generate; their adapters describe the
       // object instead of inventing a CREATE TABLE (# Redis key / // collection).
@@ -301,7 +303,7 @@ test("the row count the inspector shows is the one count_rows returns", async ()
   for (const fixture of FIXTURES) {
     const database = databaseOf(fixture);
     const namespace = namespaceOf(fixture);
-    for (const object of listedObjects(fixture).filter((entry) => entry.rowEstimate !== null)) {
+    for (const object of listedObjects(fixture).filter((entry) => entry.rowEstimate != null)) {
       const detail = await call<ObjectDetail>("object_detail", {
         connectionId: fixture.session.id,
         database,

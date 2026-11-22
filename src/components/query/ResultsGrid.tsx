@@ -51,6 +51,7 @@ interface Props {
   error: string | null;
   running: boolean;
   cancelled: boolean;
+  cancelledMessage?: string;
   /** Present when this result can be edited row by row (table previews). */
   editSource?: EditSource | null;
   onSaveChanges?: (changes: RowChangeRequest[]) => Promise<RowSaveResult>;
@@ -73,6 +74,7 @@ export function ResultsGrid({
   error,
   running,
   cancelled,
+  cancelledMessage = "Query cancelled",
   editSource = null,
   onSaveChanges,
   preview = null,
@@ -233,7 +235,7 @@ export function ResultsGrid({
 
   if (cancelled) {
     return (
-      <Placeholder icon={<Ban className="h-5 w-5 text-muted-foreground" />} text="Query cancelled" />
+      <Placeholder icon={<Ban className="h-5 w-5 text-muted-foreground" />} text={cancelledMessage} />
     );
   }
 

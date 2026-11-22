@@ -12,21 +12,23 @@ import { useWorkspace } from "@/stores/workspace";
 interface Snapshot { session: SessionInfo; database: string; tables: ObjectSchema[]; quote: string }
 
 export function SchemaToolsPanel() {
-  const sessions = useWorkspace((state) => state.sessions);
+  const openSessions = useWorkspace((state) => state.sessions);
+  const sessions = useMemo(() => openSessions.filter(({ driver }) => driver !== "cql"), [openSessions]);
   const databasesBySession = useWorkspace((state) => state.databasesBySession);
   const activeSessionId = useWorkspace((state) => state.activeSessionId);
   const loadDatabases = useWorkspace((state) => state.loadDatabases);
   const newTab = useWorkspace((state) => state.newTab);
   const pushToast = useWorkspace((state) => state.pushToast);
-  const [sourceSessionId, setSourceSessionId] = useState(activeSessionId ?? "");
-  const [targetSessionId, setTargetSessionId] = useState(activeSessionId ?? "");
+  const defaultSessionId = sessions.find(({ id }) => id === activeSessionId)?.id ?? sessions[0]?.id ?? "";
+  const [sourceSessionId, setSourceSessionId] = useState(defaultSessionId);
+  const [targetSessionId, setTargetSessionId] = useState(defaultSessionId);
   const [sourceDatabase, setSourceDatabase] = useState("");
   const [targetDatabase, setTargetDatabase] = useState("");
   const [diff, setDiff] = useState<SchemaDiff | null>(null);
   const [sql, setSql] = useState("");
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => { if (activeSessionId && !sourceSessionId) setSourceSessionId(activeSessionId); if (activeSessionId && !targetSessionId) setTargetSessionId(activeSessionId); }, [activeSessionId, sourceSessionId, targetSessionId]);
+  useEffect(() => { if (defaultSessionId && !sourceSessionId) setSourceSessionId(defaultSessionId); if (defaultSessionId && !targetSessionId) setTargetSessionId(defaultSessionId); }, [defaultSessionId, sourceSessionId, targetSessionId]);
   useEffect(() => { if (sourceSessionId) void loadDatabases(sourceSessionId); }, [sourceSessionId, loadDatabases]);
   useEffect(() => { if (targetSessionId) void loadDatabases(targetSessionId); }, [targetSessionId, loadDatabases]);
 

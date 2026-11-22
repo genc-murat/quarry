@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import CodeMirror from "@uiw/react-codemirror";
 import { autocompletion } from "@codemirror/autocomplete";
-import { MySQL, PostgreSQL, SQLite, StandardSQL, sql, type SQLNamespace } from "@codemirror/lang-sql";
+import { MySQL, PostgreSQL, SQLite, SQLDialect, StandardSQL, sql, type SQLNamespace } from "@codemirror/lang-sql";
 import { indentUnit } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
 import { oneDark } from "@codemirror/theme-one-dark";
@@ -52,6 +52,14 @@ import { useWorkspace } from "@/stores/workspace";
 
 /** Upper bound on tables fed to the autocompleter so huge schemas stay snappy. */
 const MAX_COMPLETION_TABLES = 400;
+const cqlDialect = SQLDialect.define({
+  keywords: "select from where and in contains key limit per partition order by asc desc group distinct as allow filtering token",
+  builtin: "count writetime ttl min max sum avg",
+  types: "ascii bigint blob boolean date decimal double float inet int text time timestamp timeuuid uuid varchar varint",
+  slashComments: true,
+  doubleDollarQuotedStrings: true,
+});
+const stoppedWaiting = "Stopped waiting. The query may still be running on the server.";
 
 export function QueryWorkspace() {
   const tabs = useWorkspace((s) => s.tabs);
@@ -66,6 +74,8 @@ export function QueryWorkspace() {
   const favorites = useWorkspace((s) => s.favorites);
   const saveRowChanges = useWorkspace((s) => s.saveRowChanges);
   const pageObjectData = useWorkspace((s) => s.pageObjectData);
+  const readPartitionPage = useWorkspace((s) => s.readPartitionPage);
+  const openObjectDialog = useWorkspace((s) => s.openObjectDialog);
   const sessions = useWorkspace((s) => s.sessions);
   const drivers = useWorkspace((s) => s.drivers);
   const databasesBySession = useWorkspace((s) => s.databasesBySession);
@@ -100,10 +110,12 @@ export function QueryWorkspace() {
   const tab = tabs.find((t) => t.id === activeTabId) ?? null;
   const tabId = tab?.id ?? null;
   const tabSql = tab?.sql ?? "";
-  const session = sessions.find((s) => s.id === tab?.sessionId) ?? null;
+  const sessionId = tab?.partition ? tab.objectRef?.sessionId : tab?.sessionId;
+  const session = sessions.find((s) => s.id === sessionId) ?? null;
+  const capabilities = drivers.find((driver) => driver.id === session?.driver)?.capabilities;
+  const usesCql = capabilities?.queryLanguage === "cql";
   const databases = session ? (databasesBySession[session.id] ?? []) : [];
   const dark = resolveMode(mode) === "dark";
-  const sessionId = tab?.sessionId ?? null;
   // Fall back to the database the session is connected to so completion works
   // before the user explicitly picks one.
   const database = tab?.database ?? session?.server.currentDatabase ?? null;
@@ -111,8 +123,8 @@ export function QueryWorkspace() {
   // Fetch the schema once per session+database so the editor can complete
   // table and column names (not just keywords).
   useEffect(() => {
-    if (sessionId && database) void loadColumns(sessionId, database);
-  }, [sessionId, database, loadColumns]);
+    if (!tab?.partition && sessionId && database) void loadColumns(sessionId, database);
+  }, [tab?.partition, sessionId, database, loadColumns]);
 
   // A different tab's cursor is meaningless here; start from the top again.
   useEffect(() => {
@@ -321,15 +333,15 @@ export function QueryWorkspace() {
    * and Run sends all of them.
    */
   const runStatements = useMemo(
-    () => statementsToRun(tabSql, selection.from, selection.to),
-    [tabSql, selection],
+    () => usesCql ? [] : statementsToRun(tabSql, selection.from, selection.to),
+    [tabSql, selection, usesCql],
   );
 
   /** Every statement of the tab, because the Script button sends all of them. */
-  const scriptStatements = useMemo(() => statementsInScript(tabSql), [tabSql]);
+  const scriptStatements = useMemo(() => usesCql ? [] : statementsInScript(tabSql), [tabSql, usesCql]);
 
   /** How many statements the tab holds, which is what "read 3 of 20" counts against. */
-  const scriptTotal = useMemo(() => splitStatements(tabSql).length, [tabSql]);
+  const scriptTotal = useMemo(() => usesCql ? 0 : splitStatements(tabSql).length, [tabSql, usesCql]);
 
   /**
    * The statements nothing has read yet, Run's set first and then the script's:
@@ -463,14 +475,14 @@ export function QueryWorkspace() {
   );
 
   useEffect(() => {
-    if (!assistant.smartAutocomplete) return;
+    if (!assistant.smartAutocomplete || usesCql) return;
     for (const failure of failures) {
       // `start` is the claim: an answer already in hand, or a question already in
       // flight, keeps the question for itself.
       if (!repairs.start(failure.statement, failure.error)) continue;
       void askRepair(failure.statement, failure.error);
     }
-  }, [failures, repairs, askRepair, assistant.smartAutocomplete]);
+  }, [failures, repairs, askRepair, assistant.smartAutocomplete, usesCql]);
 
   /**
    * Put a suggestion into the statement and run it.
@@ -508,14 +520,14 @@ export function QueryWorkspace() {
    */
   const repairFor = useCallback(
     (statement: string, error: string): FailureRepair | null => {
-      if (!assistant.smartAutocomplete) return null;
+      if (!assistant.smartAutocomplete || usesCql) return null;
       const repair = repairs.get(statement, error);
       if (!repair) return null;
       return { repair, fix: fixRepair(repair) };
     },
     // `repairsChanged` is the suggestion arriving: the store is not React state,
     // so this is what turns a filed answer into a render the grid can see.
-    [repairs, repairsChanged, assistant.smartAutocomplete, fixRepair],
+    [repairs, repairsChanged, assistant.smartAutocomplete, fixRepair, usesCql],
   );
 
   useEffect(() => {
@@ -545,12 +557,13 @@ export function QueryWorkspace() {
         return PostgreSQL;
       case "sqlite":
         return SQLite;
+      case "cql":
+        return cqlDialect;
       default:
         return StandardSQL;
     }
   }, [session?.driver]);
 
-  const capabilities = drivers.find((d) => d.id === session?.driver)?.capabilities;
   // Non-SQL engines (Redis) get a plain editor: a SQL dialect would offer
   // meaningless keyword completion and highlighting.
   const usesSql = (capabilities?.queryLanguage ?? "sql") === "sql";
@@ -590,7 +603,7 @@ export function QueryWorkspace() {
   // any of them changes.
   const extensions = useMemo(
     () => [
-      ...(usesSql ? [sql({ dialect, schema })] : []),
+      ...(usesSql || usesCql ? [sql({ dialect, schema })] : []),
       // Smart autocomplete replaces the language's completion sources with a
       // wrapper that runs them and lifts the model's pick to the top. `@uiw`
       // appends this array after its basic setup, and the last `override` wins.
@@ -634,10 +647,11 @@ export function QueryWorkspace() {
           );
         }
       }),
-      activeStatementHighlight(),
+      ...(usesCql ? [] : [activeStatementHighlight()]),
     ],
     [
       usesSql,
+      usesCql,
       dialect,
       schema,
       editor.wordWrap,
@@ -682,11 +696,70 @@ export function QueryWorkspace() {
     return <ObjectInspector objectRef={tab.objectRef} />;
   }
 
+  const snapshotButton = snapshots.length ? (
+    <Button size="sm" variant="ghost" onClick={(event) => setAnalysis({ sample: null, trigger: event.currentTarget })}>
+      <Camera className="h-3.5 w-3.5" /> Snapshots <span className="tabular-nums">{snapshots.length}</span>
+    </Button>
+  ) : null;
+  const analysisDialog = analysis ? (
+    <ResultAnalysisDialog sample={analysis.sample} snapshots={snapshots} onSnapshotsChange={setSnapshots}
+      onClose={() => {
+        setAnalysis(null);
+        analysis.trigger.focus();
+      }} />
+  ) : null;
+
+  if (tab.partition && tab.objectRef) {
+    const { partition, objectRef } = tab;
+    const rowCount = tab.result?.results[0]?.rows.length ?? 0;
+    return (
+      <div className="flex h-full min-h-0 flex-col">
+        <div className="space-y-2 border-b border-border bg-surface/60 px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="mr-auto flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+              <span className="font-mono-app font-medium">{objectRef.database}.{objectRef.object}</span>
+              <span className="text-muted-foreground">{session?.name ?? tab.resultSource?.connection}</span>
+              {!session ? <span className="text-warning">Disconnected. Reconnect and open the partition again.</span> : null}
+            </div>
+            {partition.offset > 0 ? (
+              <Button size="xs" variant="ghost" disabled={tab.running || !session} onClick={() => void readPartitionPage(tab.id)}>
+                First page
+              </Button>
+            ) : null}
+            {tab.running ? (
+              <Button size="xs" variant="outline" onClick={() => void cancelTab(tab.id)}>Stop waiting</Button>
+            ) : (
+              <Button size="xs" variant="outline" disabled={!partition.continuation || !session}
+                onClick={() => void readPartitionPage(tab.id, true)}>Next page</Button>
+            )}
+            {tab.error || tab.cancelled ? (
+              <Button size="xs" variant="ghost" disabled={!session} onClick={() => void readPartitionPage(tab.id)}>Reload partition</Button>
+            ) : null}
+            <Button size="xs" variant="ghost" disabled={!session}
+              onClick={() => openObjectDialog({ kind: "partition", ref: objectRef })}>Open another partition</Button>
+            {snapshotButton}
+          </div>
+          <div className="flex flex-wrap gap-x-3 gap-y-1 break-all font-mono-app text-xs text-muted-foreground">
+            {partition.keys.map(({ column, value }) => <span key={column}>{column} = {JSON.stringify(value)}</span>)}
+            {rowCount ? <span className="ml-auto tabular-nums">{partition.offset + 1}–{partition.offset + rowCount}</span> : null}
+          </div>
+        </div>
+        <div className="min-h-0 flex-1">
+          <ResultsGrid result={tab.result} error={tab.error} running={tab.running} cancelled={tab.cancelled}
+            cancelledMessage={stoppedWaiting}
+            onAnalyze={(result, trigger) => setAnalysis({ sample: { result, source: tab.resultSource }, trigger })} />
+        </div>
+        {analysisDialog}
+      </div>
+    );
+  }
+
   // The SQL a Run/Explain targets: the selection when there is one, otherwise
   // the statement under the cursor.
   function currentSql(): string {
     if (!tab) return "";
     const { from, to } = selectionRef.current;
+    if (usesCql) return from === to ? tab.sql : tab.sql.slice(from, to);
     return sqlToRun(tab.sql, from, to);
   }
 
@@ -719,17 +792,17 @@ export function QueryWorkspace() {
             size="sm"
             variant="destructive"
             onClick={() => cancelTab(tab.id)}
-            title="Stop (⌘/Ctrl + .)"
+            title={usesCql ? stoppedWaiting : "Stop (⌘/Ctrl + .)"}
           >
             <Square className="h-3.5 w-3.5" />
-            Stop
+            {usesCql ? "Stop waiting" : "Stop"}
           </Button>
         ) : (
           <Button
             size="sm"
             onClick={runCurrent}
             disabled={!session}
-            title="Run statement under cursor / selection (⌘/Ctrl + Enter)"
+            title={usesCql ? "Run the selected text or a single CQL SELECT (⌘/Ctrl + Enter)" : "Run statement under cursor / selection (⌘/Ctrl + Enter)"}
           >
             <Play className="h-3.5 w-3.5" />
             Run
@@ -741,7 +814,7 @@ export function QueryWorkspace() {
             before Run is pressed rather than after. */}
         <StatementRiskBadge read={runRisk} />
 
-        <Button
+        {!usesCql ? <Button
           size="sm"
           variant="outline"
           onClick={() => void runTab(tab.id, tab.sql)}
@@ -758,7 +831,7 @@ export function QueryWorkspace() {
               here rather than folded into Run's badge: the two commands send
               different SQL, and one mark for both would be about neither. */}
           <StatementRiskBadge read={scriptRisk} subject="script" />
-        </Button>
+        </Button> : null}
 
         {supportsExplain ? (
           <Button
@@ -811,11 +884,7 @@ export function QueryWorkspace() {
           Save query
         </Button>
 
-        {snapshots.length ? (
-          <Button size="sm" variant="ghost" onClick={(event) => setAnalysis({ sample: null, trigger: event.currentTarget })}>
-            <Camera className="h-3.5 w-3.5" /> Snapshots <span className="tabular-nums">{snapshots.length}</span>
-          </Button>
-        ) : null}
+        {snapshotButton}
 
         <div className="flex items-center gap-1.5">
           <span className="text-[11px] text-muted-foreground">Session</span>
@@ -834,7 +903,7 @@ export function QueryWorkspace() {
         </div>
 
         <div className="flex items-center gap-1.5">
-          <span className="text-[11px] text-muted-foreground">Database</span>
+          <span className="text-[11px] text-muted-foreground">{usesCql ? "Keyspace" : "Database"}</span>
           <DatabaseSelect
             className="h-7 w-44 text-xs"
             databases={databases}
@@ -883,7 +952,7 @@ export function QueryWorkspace() {
               void cancelTab(tab.id);
             } else if (event.shiftKey && supportsExplain) {
               void explainTab(tab.id, currentSql());
-            } else if (event.altKey) {
+            } else if (event.altKey && !usesCql) {
               // ⌘/Ctrl + Alt + Enter runs the whole script, not one statement.
               void runTab(tab.id, tab.sql);
             } else {
@@ -918,6 +987,7 @@ export function QueryWorkspace() {
             error={tab.error}
             running={tab.running}
             cancelled={tab.cancelled}
+            cancelledMessage={usesCql ? stoppedWaiting : undefined}
             editSource={tab.editSource}
             onSaveChanges={(changes) => saveRowChanges(tab.id, changes)}
             preview={tab.preview}
@@ -928,13 +998,7 @@ export function QueryWorkspace() {
         )}
       </div>
 
-      {analysis ? (
-        <ResultAnalysisDialog sample={analysis.sample} snapshots={snapshots} onSnapshotsChange={setSnapshots}
-          onClose={() => {
-            setAnalysis(null);
-            analysis.trigger.focus();
-          }} />
-      ) : null}
+      {analysisDialog}
 
       <Dialog
         open={saveOpen}

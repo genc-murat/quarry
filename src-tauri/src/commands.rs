@@ -18,9 +18,9 @@ use crate::error::DriverError;
 use crate::models::{
     ConnectResult, ConnectionConfig, ConnectionProfile, CreateTableRequest, DatabaseInfo,
     DatabaseObject, DriverDescriptor, InspectorSection, NamespaceInfo, ObjectAction,
-    ObjectActionRequest, ObjectDetail, ObjectKind, ObjectSchema, OpenSessionRequest, QueryRequest,
-    QueryResponse, RowChangeKind, RowChangeRequest, SectionActionRequest, SectionRequest,
-    ServerInfo, SessionInfo, Snippet, SslMode, TableColumns,
+    ObjectActionRequest, ObjectDetail, ObjectKind, ObjectSchema, OpenSessionRequest, PartitionPage,
+    PartitionRequest, QueryRequest, QueryResponse, RowChangeKind, RowChangeRequest,
+    SectionActionRequest, SectionRequest, ServerInfo, SessionInfo, Snippet, SslMode, TableColumns,
 };
 use crate::session::SessionEntry;
 use crate::sql_split::split_statements;
@@ -301,6 +301,49 @@ pub async fn list_table_columns(
         .list_table_columns(&database, namespace.as_deref())
         .await
         .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn partition_keys(
+    state: State<'_, AppState>,
+    connection_id: String,
+    database: String,
+    table: String,
+) -> CmdResult<Vec<crate::models::ColumnMeta>> {
+    connection(&state, &connection_id)
+        .await?
+        .partition_keys(&database, &table)
+        .await
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+pub async fn read_partition(
+    state: State<'_, AppState>,
+    connection_id: String,
+    request: PartitionRequest,
+) -> CmdResult<PartitionPage> {
+    let conn = connection(&state, &connection_id).await?;
+    let run_id = request.run_id.clone();
+    let cancel = run_id
+        .as_deref()
+        .map(|id| state.running.register(id))
+        .unwrap_or_default();
+    let timeout = request.timeout_ms;
+    let result = tokio::select! {
+        _ = cancel.cancelled() => Err(DriverError::Cancelled("stopped waiting for the partition page".into())),
+        _ = async {
+            match timeout {
+                Some(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
+                None => std::future::pending().await,
+            }
+        } => Err(DriverError::Cancelled("timed out waiting for the partition page".into())),
+        result = conn.read_partition(request) => result,
+    };
+    if let Some(id) = run_id.as_deref() {
+        state.running.finish(id);
+    }
+    result.map_err(Into::into)
 }
 
 #[tauri::command]

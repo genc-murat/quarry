@@ -12,6 +12,7 @@ import type {
   ObjectActionRequest,
   ObjectDetail,
   OpenSessionRequest,
+  PartitionKeyValue,
   QueryLanguage,
   QueryResponse,
   RowChangeRequest,
@@ -100,6 +101,7 @@ export function canConnectWithoutPrompt(
   // rather than being attempted on every launch.
   if (!driver) return false;
   if (profile.hasPassword) return true;
+  if (driver.capabilities.queryLanguage === "cql" && !profile.username) return true;
   return !driver.configFields.some((field) => field.fieldType === "password");
 }
 
@@ -155,6 +157,7 @@ export interface QueryTab {
   editSource: EditSource | null;
   /** Pagination window for a table preview. */
   preview: { limit: number; offset: number } | null;
+  partition?: { keys: PartitionKeyValue[]; pageSize: number; continuation: string | null; offset: number };
   result: QueryResponse | null;
   resultSource: ResultSource | null;
   /** Latest EXPLAIN output, shown in place of the grid until cleared. */
@@ -348,6 +351,8 @@ interface WorkspaceState {
   runObjectAction: (request: ObjectActionRequest) => Promise<boolean>;
   saveRowChanges: (tabId: string, changes: RowChangeRequest[]) => Promise<RowSaveResult>;
   pageObjectData: (tabId: string, offset: number) => Promise<void>;
+  openPartition: (ref: ObjectRef, keys: PartitionKeyValue[]) => void;
+  readPartitionPage: (tabId: string, next?: boolean) => Promise<void>;
   createTable: (request: CreateTableRequest) => Promise<boolean>;
   persistSettings: () => void;
   openObjectDialog: (dialog: ObjectDialogRequest) => void;
@@ -487,7 +492,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       // workspace that already had a session keeps the one it was on.
       if (!get().activeSessionId) set({ activeSessionId: get().sessions[0]?.id ?? null });
       const activeTab = get().tabs.find((tab) => tab.id === get().activeTabId);
-      if (activeTab && !activeTab.sessionId) {
+      if (activeTab && !activeTab.partition && !activeTab.sessionId) {
         get().updateTab(activeTab.id, { sessionId: get().activeSessionId });
       }
       get().pushToast({
@@ -706,7 +711,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       }));
       // Seed the active tab so queries land on the new session.
       const activeTab = get().tabs.find((t) => t.id === get().activeTabId);
-      if (activeTab) {
+      if (activeTab && !activeTab.partition) {
         get().updateTab(activeTab.id, {
           sessionId: session.id,
           title: label ?? activeTab.title,
@@ -777,7 +782,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
   setActiveSession: (sessionId) => {
     set({ activeSessionId: sessionId });
     const activeTab = get().tabs.find((t) => t.id === get().activeTabId);
-    if (activeTab) {
+    if (activeTab && !activeTab.partition) {
       get().updateTab(activeTab.id, { sessionId });
     }
   },
@@ -831,9 +836,10 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       sql: init?.sql ?? "",
       sessionId,
       database: init?.database ?? null,
-      objectRef: null,
+      objectRef: init?.objectRef ?? null,
       editSource: init?.editSource ?? null,
       preview: init?.preview ?? null,
+      partition: init?.partition,
       result: null,
       resultSource: null,
       plan: null,
@@ -947,8 +953,9 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     }
     const sql = (sqlOverride ?? tab.sql).trim();
     if (!sql) return;
+    const language = queryLanguageFor(get().drivers, get().sessions, tab.sessionId);
 
-    if (get().settings.safety.requireWhereForWrites) {
+    if (language !== "cql" && get().settings.safety.requireWhereForWrites) {
       const unscopedWrites = writesWithoutWhere(sql);
       if (unscopedWrites.length > 0) {
         get().pushToast({
@@ -1028,7 +1035,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
 
       // A database/schema DDL changes what the explorer lists, so re-read it
       // rather than making the user press Refresh.
-      if (changesDatabaseSet(sql)) {
+      if (language !== "cql" && changesDatabaseSet(sql)) {
         void get().loadDatabases(tab.sessionId);
       }
 
@@ -1161,12 +1168,16 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
   closeObjectDialog: () => set({ objectDialog: null }),
 
   openObjectData: async (ref) => {
+    const language = queryLanguageFor(get().drivers, get().sessions, ref.sessionId);
+    if (language === "cql") {
+      get().openObjectDialog({ kind: "partition", ref });
+      return;
+    }
     const detail = await get().loadObjectDetail(ref);
     if (!detail) return;
     // The editor and the grid must show the same query: build the preview SQL
     // once, use it as the tab's text, and run it through the normal path.
     const quote = detail.identifierQuote || '"';
-    const language = queryLanguageFor(get().drivers, get().sessions, ref.sessionId);
     const isTable = ref.objectKind === "table";
     const columnTypes: Record<string, string> = {};
     for (const column of detail.schema.columns) columnTypes[column.name] = column.dataType;
@@ -1191,6 +1202,73 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
         : null,
     });
     await get().runTab(id);
+  },
+
+  openPartition: (ref, keys) => {
+    const { editor, results } = get().settings;
+    const pageSize = Math.min(editor.maxRows, results.pageSize, 1000);
+    const tabId = get().newTab({
+      title: `${ref.object} partition`,
+      sessionId: null,
+      database: ref.database,
+      objectRef: ref,
+      partition: { keys, pageSize, continuation: null, offset: 0 },
+    });
+    void get().readPartitionPage(tabId);
+  },
+
+  readPartitionPage: async (tabId, next = false) => {
+    const { tabs, sessions, settings } = get();
+    const tab = tabs.find(({ id }) => id === tabId);
+    if (!tab?.partition || !tab.objectRef || tab.running) return;
+    const { partition, objectRef: ref } = tab;
+    if (next && !partition.continuation) return;
+    const session = sessions.find(({ id }) => id === ref.sessionId);
+    if (!session) {
+      get().updateTab(tabId, { error: "Reconnect and open the partition again." });
+      return;
+    }
+    const runId = crypto.randomUUID();
+    get().updateTab(tabId, { runId, running: true, cancelled: false, error: null });
+    try {
+      const { result, continuation } = await ipc.readPartition(ref.sessionId, {
+        database: ref.database,
+        table: ref.object,
+        keys: partition.keys,
+        pageSize: partition.pageSize,
+        continuation: next ? partition.continuation : null,
+        timeoutMs: settings.editor.timeoutMs || undefined,
+        runId,
+      });
+      const current = get().tabs.find(({ id }) => id === tabId);
+      if (current?.runId !== runId) return;
+      if (current.cancelled) {
+        get().updateTab(tabId, { runId: null, running: false });
+        return;
+      }
+      const offset = next ? partition.offset + (tab.result?.results[0]?.rows.length ?? 0) : 0;
+      get().updateTab(tabId, {
+        partition: { ...partition, offset, continuation },
+        result,
+        resultSource: {
+          title: tab.title,
+          connection: session.name,
+          database: ref.database,
+          completedAt: Date.now(),
+          preview: { limit: partition.pageSize, offset },
+          partitionKeys: partition.keys,
+        },
+        error: null,
+        running: false,
+        runId: null,
+      });
+    } catch (error) {
+      const current = get().tabs.find(({ id }) => id === tabId);
+      if (current?.runId !== runId) return;
+      get().updateTab(tabId, {
+        error: current.cancelled ? null : errorMessage(error), running: false, runId: null,
+      });
+    }
   },
 
   pageObjectData: async (tabId, offset) => {

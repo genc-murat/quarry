@@ -727,6 +727,7 @@ impl Connection for MssqlConnection {
             let column = ColumnMeta {
                 name: row_string(&row, 1),
                 data_type: Some(row_string(&row, 2)),
+                compare_as_decimal: false,
             };
             match out.last_mut() {
                 Some(entry) if entry.table == table => entry.columns.push(column),
@@ -941,6 +942,7 @@ fn columns_of(columns: &[tiberius::Column]) -> Vec<ColumnMeta> {
         .map(|column| ColumnMeta {
             name: column.name().to_string(),
             data_type: Some(column_type_name(column.column_type())),
+            compare_as_decimal: false,
         })
         .collect()
 }

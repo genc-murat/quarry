@@ -1,8 +1,8 @@
 # Quarry
 
 A **modular, themeable database studio** written with Tauri v2 (Rust) + React.
-Today it supports **MySQL 5.6**, **PostgreSQL**, **SQLite**, **SQL Server**, **Redis**, **MongoDB**
-and **ClickHouse**; the architecture lets you add new engines by writing only a new adapter.
+Today it supports **MySQL 5.6**, **PostgreSQL**, **SQLite**, **SQL Server**, **Redis**, **MongoDB**,
+**ClickHouse** and **Cassandra / ScyllaDB**.
 
 > The name comes from "quarry": you dig the data out, and the node network in its icon
 > represents databases connected from a single place — the node colors are taken from the
@@ -55,8 +55,9 @@ The UI never contains driver-specific code. Differences are carried by two mecha
    first so the drift check can show the difference, then add the engine's `EngineFixture` to
    `src/lib/mockFixtures.ts` and align until `npm run check:drift` is green.
 
-**Not a single line changes in the IPC layer, `commands.rs` or the UI.** On the next launch the
-driver automatically appears in the `list_drivers` output and the connection form builds itself.
+On the next launch the driver appears in the `list_drivers` output and the connection form builds
+itself. A new query language or interaction, such as CQL partition paging, can extend the shared
+contracts and workspace.
 
 An engine declares its own quoting dialect (`DatabaseDriver::dialect`) and how a read is explained
 (`DatabaseDriver::explain_statement`, or `None` if it cannot) on the driver; every connection
@@ -642,6 +643,26 @@ bundle it found in the target directory before it exits.
 - **Test coverage**: the live tests verify the connection, query, pagination, listing, schema, DDL
   and wizard paths against ClickHouse 26.10. Other versions and the click-through flow in the
   desktop UI were not verified.
+
+## Cassandra / ScyllaDB notes
+
+- Select **Cassandra / ScyllaDB** to add a connection. Enter comma-separated contact points and
+  a shared CQL port (default `9042`). Supply username and password when authentication is enabled.
+  **TLS Required** verifies node certificates using system roots or an explicit PEM CA file.
+  The client uses the IP addresses advertised by the cluster for discovery and TLS verification.
+  Make those addresses reachable and include them in the server certificates' IP SANs.
+  Set **Local datacenter** to prefer nearby replicas.
+- Choose a keyspace in the editor or set a connection default. Run a single CQL `SELECT` by
+  selecting its text or putting it in the editor. The editor offers table and column completion.
+  **Stop waiting** stops the client from waiting for the result. The server may finish the request.
+- From the Explorer or inspector, select **View data** and supply every partition key component.
+  **Next page** follows the cluster's paging state. The **CQL keys** inspector tab shows the
+  partition and clustering keys in order. Use both sets together to compare individual rows in
+  **Analysis → Compare**. Each partition page is captured separately when you take a snapshot.
+- The first release covers reads and generic CSV/JSON result exports. The partition form supports
+  scalar keys, including UUIDs and exact decimals. Use the CQL editor for composite value types
+  such as frozen collections. The demo uses `tracking.shipments` with region `north` and month
+  `2026-11`.
 
 ## Editor and IntelliSense
 

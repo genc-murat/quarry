@@ -551,6 +551,7 @@ impl Decoder {
                 .map(|name| ColumnMeta {
                     name,
                     data_type: None,
+                    compare_as_decimal: false,
                 })
                 .collect(),
             rows: self.rows,
@@ -1072,6 +1073,7 @@ impl Connection for ClickHouseConnection {
             out[position].columns.push(ColumnMeta {
                 name: text(&cell(row, 1)),
                 data_type: Some(text(&cell(row, 2))),
+                compare_as_decimal: false,
             });
         }
         Ok(out)

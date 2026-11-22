@@ -101,6 +101,125 @@
     "explainSelect": "EXPLAIN indexes = 1 SELECT 1"
   },
   {
+    "id": "cql",
+    "displayName": "Cassandra / ScyllaDB",
+    "defaultPort": 9042,
+    "accentColor": "#4f9fcf",
+    "capabilities": {
+      "queryLanguage": "cql",
+      "resultShape": "tabular",
+      "isRelational": false,
+      "supportsMultipleDatabases": true,
+      "supportsSchemas": false,
+      "supportsTransactions": false,
+      "supportsDdl": false,
+      "supportsExplain": false,
+      "supportsCancel": false,
+      "objectKinds": [
+        "table",
+        "materializedView"
+      ],
+      "supportedActions": [
+        "inspect",
+        "viewData",
+        "copyName"
+      ]
+    },
+    "configFields": [
+      {
+        "key": "host",
+        "label": "Contact points",
+        "fieldType": "text",
+        "placeholder": "127.0.0.1",
+        "required": true,
+        "defaultValue": null,
+        "options": [],
+        "help": "Comma-separated hosts. Use the same port for all contact points."
+      },
+      {
+        "key": "port",
+        "label": "Port",
+        "fieldType": "number",
+        "placeholder": null,
+        "required": true,
+        "defaultValue": 9042,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "username",
+        "label": "Username",
+        "fieldType": "text",
+        "placeholder": null,
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "password",
+        "label": "Password",
+        "fieldType": "password",
+        "placeholder": null,
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "database",
+        "label": "Default keyspace",
+        "fieldType": "text",
+        "placeholder": null,
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "localDatacenter",
+        "label": "Local datacenter",
+        "fieldType": "text",
+        "placeholder": null,
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": null
+      },
+      {
+        "key": "sslMode",
+        "label": "TLS",
+        "fieldType": "select",
+        "placeholder": null,
+        "required": false,
+        "defaultValue": "disabled",
+        "options": [
+          {
+            "value": "disabled",
+            "label": "Disabled"
+          },
+          {
+            "value": "required",
+            "label": "Required · verify certificate"
+          }
+        ],
+        "help": null
+      },
+      {
+        "key": "caFile",
+        "label": "TLS CA certificate",
+        "fieldType": "text",
+        "placeholder": null,
+        "required": false,
+        "defaultValue": null,
+        "options": [],
+        "help": "Optional PEM file path. With TLS enabled, an empty path uses system roots."
+      }
+    ],
+    "identifierQuote": "\"",
+    "explainSelect": null
+  },
+  {
     "id": "mongodb",
     "displayName": "MongoDB",
     "defaultPort": 27017,

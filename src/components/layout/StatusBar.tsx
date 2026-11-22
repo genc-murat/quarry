@@ -10,8 +10,9 @@ export function StatusBar() {
   const activeTabId = useWorkspace((s) => s.activeTabId);
   const maxRows = useWorkspace((s) => s.settings.editor.maxRows);
 
-  const session = sessions.find((s) => s.id === activeSessionId) ?? null;
   const tab = tabs.find((t) => t.id === activeTabId) ?? null;
+  const sessionId = tab?.partition ? tab.objectRef?.sessionId : activeSessionId;
+  const session = sessions.find((s) => s.id === sessionId) ?? null;
   const lastResult = tab?.result?.results.filter((r) => r.isQuery).at(-1) ?? null;
 
   return (

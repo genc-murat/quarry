@@ -707,10 +707,12 @@ fn reply_to_table(value: &RedisValue, max_rows: usize) -> (Vec<ColumnMeta>, Vec<
                 ColumnMeta {
                     name: "field".into(),
                     data_type: Some("string".into()),
+                    compare_as_decimal: false,
                 },
                 ColumnMeta {
                     name: "value".into(),
                     data_type: Some("string".into()),
+                    compare_as_decimal: false,
                 },
             ];
             let rows = pairs
@@ -723,6 +725,7 @@ fn reply_to_table(value: &RedisValue, max_rows: usize) -> (Vec<ColumnMeta>, Vec<
             vec![ColumnMeta {
                 name: "value".into(),
                 data_type: Some(scalar_type(scalar).into()),
+                compare_as_decimal: false,
             }],
             vec![vec![scalar_value(scalar)]],
         ),
@@ -756,6 +759,7 @@ fn array_table(items: &[RedisValue]) -> (Vec<ColumnMeta>, Vec<Vec<Value>>) {
             .map(|index| ColumnMeta {
                 name: format!("col_{index}"),
                 data_type: Some("string".into()),
+                compare_as_decimal: false,
             })
             .collect();
         let rows = items
@@ -774,6 +778,7 @@ fn array_table(items: &[RedisValue]) -> (Vec<ColumnMeta>, Vec<Vec<Value>>) {
         let columns = vec![ColumnMeta {
             name: "value".into(),
             data_type: Some("string".into()),
+            compare_as_decimal: false,
         }];
         let rows = items.iter().map(|item| vec![scalar_value(item)]).collect();
         (columns, rows)

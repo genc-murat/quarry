@@ -100,6 +100,7 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
 
   const quote = detail?.identifierQuote || '"';
   const driverId = useWorkspace((s) => s.sessions.find((session) => session.id === objectRef.sessionId)?.driver);
+  const cql = driverId === "cql";
   const supports = (action: ObjectAction) => detail?.actions.includes(action) ?? false;
   const isTable = objectRef.objectKind === "table";
 
@@ -178,14 +179,16 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
     ? [{ id: "ddl", label: "Trigger SQL" }]
     : [
         { id: "columns", label: "Columns", hint: String(detail.schema.columns.length) },
-        { id: "diagram", label: "ER diagram" },
-        { id: "indexes", label: "Indexes", hint: String(detail.schema.indexes.length) },
-        { id: "keys", label: "Foreign keys", hint: String(detail.schema.foreignKeys.length) },
+        ...(cql ? [] : [
+          { id: "diagram", label: "ER diagram" },
+          { id: "indexes", label: "Indexes", hint: String(detail.schema.indexes.length) },
+          { id: "keys", label: "Foreign keys", hint: String(detail.schema.foreignKeys.length) },
+        ]),
         ...detail.sections.map((section) => ({
           id: sectionTabId(section.id),
           label: section.label,
         })),
-        { id: "ddl", label: "DDL" },
+        ...(cql ? [] : [{ id: "ddl", label: "DDL" }]),
       ];
   // A reload can drop a declared section (or the object can change while its
   // section is open), so the active tab always falls back to a tab that exists.
@@ -333,7 +336,7 @@ export function ObjectInspector({ objectRef }: { objectRef: ObjectRef }) {
             <Download className="h-3 w-3" /> Export
           </Button>
         ) : null}
-        {objectRef.objectKind === "table" && detail.schema.columns.length > 0 ? (
+        {!cql && objectRef.objectKind === "table" && detail.schema.columns.length > 0 ? (
           <Button size="xs" variant="ghost" onClick={() => setImportOpen(true)}>
             <FileUp className="h-3 w-3" /> Import
           </Button>

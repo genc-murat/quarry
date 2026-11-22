@@ -155,12 +155,15 @@ function SampleDetails({ sample }: { sample: ResultSample }) {
         {source?.connection ? <span>{source.connection}</span> : null}
         {source?.database ? <span title="Database selected for this run">{source.database}</span> : null}
         {source ? <time dateTime={new Date(source.completedAt).toISOString()}>{new Date(source.completedAt).toLocaleString()}</time> : null}
-        {preview ? <Badge variant="warning">Preview tab · offset {formatCount(preview.offset)}</Badge> : null}
+        {preview ? <Badge variant="warning">{source?.partitionKeys ? "Partition page" : "Preview tab"} · offset {formatCount(preview.offset)}</Badge> : null}
         {result.truncated ? <Badge variant="warning">Truncated</Badge> : null}
       </div>
       <details>
         <summary className="w-fit cursor-pointer hover:text-foreground">Executed statement</summary>
         <pre className="mt-1 max-h-28 overflow-auto rounded bg-background p-2 font-mono-app whitespace-pre-wrap break-words">{result.statement}</pre>
+        {source?.partitionKeys?.map(({ column, value }) => (
+          <div key={column} className="mt-1 break-all font-mono-app">{column} = {JSON.stringify(value)}</div>
+        ))}
       </details>
     </div>
   );

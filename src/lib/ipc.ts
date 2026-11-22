@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { mockInvoke } from "./mock";
 import type {
   ConnectResult,
+  ColumnMeta,
   ConnectionProfile,
   CreateTableRequest,
   DatabaseInfo,
@@ -17,6 +18,8 @@ import type {
   ObjectSectionActionRequest,
   ObjectSectionRequest,
   OpenSessionRequest,
+  PartitionPage,
+  PartitionRequest,
   QueryRequest,
   QueryResponse,
   RankCandidatesRequest,
@@ -107,6 +110,10 @@ export const ipc = {
   ) => call<ObjectSchema>("describe_object", { connectionId, database, namespace, object }),
   listTableColumns: (connectionId: string, database: string, namespace?: string | null) =>
     call<TableColumns[]>("list_table_columns", { connectionId, database, namespace }),
+  partitionKeys: (connectionId: string, database: string, table: string) =>
+    call<ColumnMeta[]>("partition_keys", { connectionId, database, table }),
+  readPartition: (connectionId: string, request: PartitionRequest) =>
+    call<PartitionPage>("read_partition", { connectionId, request }),
 
   executeQuery: (connectionId: string, request: QueryRequest) =>
     call<QueryResponse>("execute_query", { connectionId, request }),

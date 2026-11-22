@@ -451,6 +451,7 @@ impl Connection for SqliteConnection {
             let column = ColumnMeta {
                 name: row.try_get("column_name").unwrap_or_default(),
                 data_type: row.try_get("data_type").ok(),
+                compare_as_decimal: false,
             };
             match tables.last_mut() {
                 Some(entry) if entry.table == table => entry.columns.push(column),
@@ -530,6 +531,7 @@ async fn run_statement(
                 .map(|column| ColumnMeta {
                     name: column.name().to_string(),
                     data_type: Some(column.type_info().name().to_string()),
+                    compare_as_decimal: false,
                 })
                 .collect();
             if columns.is_empty() {

@@ -10,9 +10,8 @@
  *
  * The data mirrors what the Rust adapter really returns for that engine
  * (capabilities, config fields, object kinds, identifier quoting, and the
- * inspector sections the driver declares). Inspector sections are **not**
- * invented here: only ClickHouse declares them today, so only its fixture has
- * any, and the others answer the section commands exactly as their adapters do.
+ * inspector sections the driver declares). Fixtures expose the same inspector
+ * sections as their adapters.
  *
  * `fixtureDrift.test.ts` holds that mirror to the Rust drivers' own
  * declarations (see `fixtures/driver-descriptors.json`): the driver block, the
@@ -1480,8 +1479,94 @@ const CLICKHOUSE: EngineFixture = {
   },
 };
 
+const cqlProfile: ConnectionProfile = {
+  id: "demo-cql-profile",
+  name: "Local Cassandra / ScyllaDB",
+  driver: "cql",
+  host: "127.0.0.1",
+  port: 9042,
+  username: "",
+  database: "tracking",
+  sslMode: "disabled",
+  options: {},
+  hasPassword: false,
+};
+
+const cqlServer: ServerInfo = {
+  version: "5.0.9",
+  serverComment: "Demo CQL cluster",
+  currentDatabase: "tracking",
+  supportsTls: false,
+};
+
+const cqlColumns = [
+  column("region", "text", { isPrimaryKey: true }),
+  column("month", "text", { isPrimaryKey: true }),
+  column("sequence", "int", { isPrimaryKey: true }),
+  column("amount", "decimal", { nullable: true }),
+  column("status", "text", { nullable: true }),
+];
+export const CQL_DEMO_PARTITION_KEYS = cqlColumns.slice(0, 2).map(({ name, dataType }) => ({ name, dataType }));
+export const CQL_DEMO_COLUMNS = cqlColumns.map(({ name, dataType }) => ({
+  name,
+  dataType,
+  ...(dataType === "decimal" ? { compareAsDecimal: true } : {}),
+}));
+export const CQL_DEMO_ROWS = Array.from({ length: 242 }, (_, index) => [
+  index < 240 ? "north" : "south",
+  "2026-11",
+  index + 1,
+  (22 + index / 100).toFixed(2),
+  index % 2 ? "received" : "shipped",
+]);
+
+const CQL: EngineFixture = {
+  driver: {
+    id: "cql", displayName: "Cassandra / ScyllaDB", defaultPort: 9042, accentColor: "#4f9fcf",
+    capabilities: {
+      queryLanguage: "cql", resultShape: "tabular", isRelational: false,
+      supportsMultipleDatabases: true, supportsSchemas: false, supportsTransactions: false,
+      supportsDdl: false, supportsExplain: false, supportsCancel: false,
+      objectKinds: ["table", "materializedView"], supportedActions: ["inspect", "viewData", "copyName"],
+    },
+    configFields: [
+      { key: "host", label: "Contact points", fieldType: "text", required: true, placeholder: "127.0.0.1",
+        options: [], help: "Comma-separated hosts. Use the same port for all contact points." },
+      { key: "port", label: "Port", fieldType: "number", required: true, defaultValue: 9042, options: [] },
+      { key: "username", label: "Username", fieldType: "text", required: false, options: [] },
+      { key: "password", label: "Password", fieldType: "password", required: false, options: [] },
+      { key: "database", label: "Default keyspace", fieldType: "text", required: false, options: [] },
+      { key: "localDatacenter", label: "Local datacenter", fieldType: "text", required: false, options: [] },
+      { key: "sslMode", label: "TLS", fieldType: "select", required: false, defaultValue: "disabled", options: [
+        { value: "disabled", label: "Disabled" },
+        { value: "required", label: "Required · verify certificate" },
+      ] },
+      { key: "caFile", label: "TLS CA certificate", fieldType: "text", required: false,
+        options: [], help: "Optional PEM file path. With TLS enabled, an empty path uses system roots." },
+    ],
+  },
+  profile: cqlProfile,
+  server: cqlServer,
+  session: { id: "demo-cql-session", profileId: cqlProfile.id, driver: "cql", name: cqlProfile.name, server: cqlServer },
+  quote: '"',
+  databases: [{ name: "tracking", isSystem: false }],
+  namespaces: [],
+  objects: [{ name: "shipments", kind: "table", schema: "tracking" }],
+  schema: (object) => schemaOf(object, "table", cqlColumns),
+  ddl: () => "",
+  count: () => { throw new Error("CQL has no automatic table count"); },
+  sections: () => [{
+    id: "cql-keys", label: "CQL keys", source: "inline", actions: [],
+    blocks: [{ type: "fields", fields: [
+      { label: "Partition key", value: "region, month" },
+      { label: "Clustering key", value: "sequence" },
+    ] }],
+  }],
+  completableKinds: ["table", "materializedView"],
+};
+
 /** One fixture per driver; everything else in the mock is generated from it. */
-export const FIXTURES: EngineFixture[] = [MYSQL, POSTGRES, MSSQL, SQLITE, REDIS, MONGO, CLICKHOUSE];
+export const FIXTURES: EngineFixture[] = [MYSQL, POSTGRES, MSSQL, SQLITE, REDIS, MONGO, CLICKHOUSE, CQL];
 
 const BY_DRIVER = new Map(FIXTURES.map((fixture) => [fixture.driver.id, fixture]));
 const BY_SESSION = new Map(FIXTURES.map((fixture) => [fixture.session.id, fixture]));

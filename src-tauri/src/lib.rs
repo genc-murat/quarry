@@ -102,6 +102,8 @@ pub fn run() {
             commands::list_objects,
             commands::describe_object,
             commands::list_table_columns,
+            commands::partition_keys,
+            commands::read_partition,
             commands::execute_query,
             commands::cancel_query,
             commands::explain_query,

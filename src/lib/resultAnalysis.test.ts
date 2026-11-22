@@ -46,6 +46,47 @@ test("unkeyed comparison preserves duplicate counts and JSON value types", () =>
   });
 });
 
+test("CQL decimal comparison preserves precision and the original report values", () => {
+  const before = result(["cluster", "amount", "status"], [
+    ["12.0", "9007199254740993.01", "old"], ["13.00", "-0.00", "same"],
+  ]);
+  const after = result(["cluster", "amount", "status"], [
+    ["1.200e+1", "9007199254740993.02", "new"], ["13.0", "0E+10", "same"],
+  ]);
+  for (const sample of [before, after]) {
+    sample.columns[0].compareAsDecimal = true;
+    sample.columns[1].compareAsDecimal = true;
+  }
+  const aligned = alignResultColumns(before, after);
+  assert.deepEqual(compareResults(before, after, aligned, ["cluster"]), {
+    differences: [{ kind: "changed", fields: ["amount", "status"], before: before.rows[0], after: after.rows[0] }],
+    counts: { added: 0, removed: 0, changed: 1 },
+    matching: 1,
+  });
+  const unkeyed = compareResults(before, after, aligned, []);
+  assert.ok(!("error" in unkeyed));
+  assert.deepEqual(unkeyed.counts, { added: 1, removed: 1, changed: 0 });
+  assert.equal(unkeyed.matching, 1);
+
+  before.columns[0].compareAsDecimal = false;
+  after.columns[0].compareAsDecimal = false;
+  assert.deepEqual(compareResults(before, after, alignResultColumns(before, after), ["cluster"]), {
+    differences: [
+      { kind: "added", after: after.rows[0] }, { kind: "added", after: after.rows[1] },
+      { kind: "removed", before: before.rows[0] }, { kind: "removed", before: before.rows[1] },
+    ],
+    counts: { added: 2, removed: 2, changed: 0 },
+    matching: 0,
+  });
+});
+
+test("CQL decimal profiling groups equal values and shows their stored scale", () => {
+  const sample = result(["amount"], [["12.0"], ["12.00"], ["12.01"]]);
+  sample.columns[0].compareAsDecimal = true;
+  assert.deepEqual(profileResult(sample), [{ nulls: 0, blanks: 0, distinct: 2, repeats: 2 }]);
+  assert.deepEqual(profileRows(sample, 0, "repeats"), [{ row: 1, value: "12.0" }, { row: 2, value: "12.00" }]);
+});
+
 test("invalid row identities and ambiguous column names produce explicit errors", () => {
   const before = result(["id"], [[1]]);
   for (const [after, message] of [

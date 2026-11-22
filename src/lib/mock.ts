@@ -22,6 +22,7 @@ import type {
   ObjectActionRequest,
   ObjectSectionActionRequest,
   ObjectSectionRequest,
+  PartitionRequest,
   QueryRequest,
   QueryResponse,
   RankCandidatesResponse,
@@ -35,6 +36,9 @@ import type {
 // Explicit `.ts` like `./mockFixtures.ts`, so `node --test` can load this module.
 import { mongoStatements, redisStatements } from "./mockReplies.ts";
 import {
+  CQL_DEMO_COLUMNS,
+  CQL_DEMO_PARTITION_KEYS,
+  CQL_DEMO_ROWS,
   FIXTURES,
   type EngineFixture,
   detailOf,
@@ -249,6 +253,10 @@ function buildResult(request: QueryRequest): QueryResponse {
 function scriptResult(fixture: EngineFixture, request: QueryRequest): QueryResponse {
   const maxRows = request.maxRows && request.maxRows > 0 ? request.maxRows : DEFAULT_MAX_ROWS;
   switch (fixture.driver.capabilities.queryLanguage) {
+    case "cql": {
+      if (!/^\s*select\b/i.test(request.sql)) throw new Error("CQL supports one SELECT per run");
+      return cqlResult(request.sql, CQL_DEMO_ROWS.slice(0, maxRows), CQL_DEMO_ROWS.length > maxRows);
+    }
     case "redis": {
       const results = redisStatements(request.sql, fixture.keys ?? [], maxRows);
       if (results.length === 0) throw new Error("no command to execute");
@@ -262,6 +270,13 @@ function scriptResult(fixture: EngineFixture, request: QueryRequest): QueryRespo
     default:
       return buildResult(request);
   }
+}
+
+function cqlResult(statement: string, rows: unknown[][], truncated: boolean): QueryResponse {
+  return {
+    results: [{ statement, isQuery: true, columns: CQL_DEMO_COLUMNS, rows, rowCount: rows.length, executionMs: 1, truncated }],
+    totalMs: 1,
+  };
 }
 
 /** The trait's default explain: prefix `EXPLAIN`, trailing semicolons dropped. */
@@ -407,6 +422,29 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
             })),
           })),
       );
+    }
+    case "partition_keys":
+      if (fixture.driver.id !== "cql" || args?.table !== "shipments" || args?.database !== "tracking") {
+        throw new Error("partition preview is unavailable");
+      }
+      return respond(CQL_DEMO_PARTITION_KEYS);
+    case "read_partition": {
+      const request = args?.request as PartitionRequest;
+      if (fixture.driver.id !== "cql" || request.database !== "tracking" || request.table !== "shipments") {
+        throw new Error("partition preview is unavailable");
+      }
+      const [region, month] = request.keys;
+      if (request.keys.length !== 2 || region?.column !== "region" || month?.column !== "month") {
+        throw new Error("provide every partition key component in schema order");
+      }
+      const rows = CQL_DEMO_ROWS.filter((row) => row[0] === region.value && row[1] === month.value);
+      const offset = Number(request.continuation ?? 0);
+      const limit = Math.max(1, Math.min(request.pageSize, 1000));
+      const end = offset + limit;
+      return respond({
+        result: cqlResult('SELECT * FROM "tracking"."shipments" WHERE "region" = ? AND "month" = ?', rows.slice(offset, end), false),
+        continuation: end < rows.length ? String(end) : null,
+      });
     }
     case "execute_query": {
       const request = (args?.request as QueryRequest) ?? { sql: "SELECT 1" };

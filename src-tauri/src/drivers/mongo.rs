@@ -858,6 +858,7 @@ fn documents_table(documents: &[Document], max_rows: usize) -> Table {
         .map(|name| ColumnMeta {
             name: name.clone(),
             data_type: None,
+            compare_as_decimal: false,
         })
         .collect();
     let rows = documents
