@@ -101,6 +101,7 @@ function tab(): QueryTab {
     editSource: null,
     preview: null,
     result: null,
+    resultSource: null,
     plan: null,
     error: null,
     running: false,
@@ -872,4 +873,82 @@ test("a script is read even while the cursor sits in a harmless statement", asyn
     button.textContent?.includes("Script"),
   );
   assert.match(scriptButton?.getAttribute("title") ?? "", /2 of 2 statements/);
+});
+
+test("a captured result survives closing its tab and compares with the selected statement of a later script", async (t) => {
+  const before = "SELECT id, status FROM before_backfill";
+  const after = "SELECT id, status FROM after_backfill";
+  const rowResult = (statement: string, rows: unknown[][], truncated = false) => ({
+    statement,
+    isQuery: true,
+    columns: [{ name: "id" }, { name: "status" }],
+    rows,
+    rowCount: rows.length,
+    executionMs: 1,
+    truncated,
+  });
+  const backend = installTestBackend({
+    execute_query: (_args) => backend.argsFor("execute_query").length === 1
+      ? { results: [rowResult(before, [[1, null], [2, "done"]], true)], totalMs: 1 }
+      : { results: [rowResult("SELECT 'unrelated'", []), rowResult(after, [[2, "done"], [1, "ready"]])], totalMs: 2 },
+  });
+  cleanup(t, backend);
+  seed();
+  useWorkspace.setState({ settings: mergeSettings(undefined), tabs: [{ ...tab(), sql: before }] });
+  const { view } = await openEditor(t);
+
+  await click(view, "Run");
+  await act(async () => useWorkspace.getState().updateTab("t1", { database: "changed after execution" }));
+  await click(view, "Analysis");
+  const dialog = view.container.querySelector('[role="dialog"][aria-label="Result analysis"]');
+  assert.ok(dialog);
+  assert.match(dialog.textContent ?? "", /Truncated/);
+  assert.match(dialog.textContent ?? "", /main/);
+  assert.doesNotMatch(dialog.textContent ?? "", /changed after execution/);
+  const nullCount = dialog.querySelector<HTMLButtonElement>('button[aria-label="status (column 2): 1 nulls"]');
+  assert.ok(nullCount);
+  await act(async () => nullCount.click());
+  assert.match(dialog.textContent ?? "", /Row 1\s*NULL/);
+
+  await click(view, "Snapshots");
+  const name = dialog.querySelector("input");
+  assert.ok(name);
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(name), "value")?.set?.call(name, "Before backfill");
+    name.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await click(view, "Capture snapshot");
+  assert.match(dialog.textContent ?? "", /Captured “Before backfill”/);
+  await act(async () => window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" })));
+
+  await act(async () => {
+    const workspace = useWorkspace.getState();
+    workspace.newTab({ sql: `SELECT 'unrelated'; ${after}`, database: "other" });
+    workspace.closeTab("t1");
+  });
+  await click(view, "Script");
+  await click(view, "#2");
+  await click(view, "Analysis");
+  await click(view, "Compare");
+  const comparison = view.container.querySelector('[role="dialog"][aria-label="Result analysis"]');
+  assert.ok(comparison);
+  assert.match(comparison.textContent ?? "", /Before backfill/);
+  assert.match(comparison.textContent ?? "", /Truncated/);
+  assert.match(comparison.textContent ?? "", /main/);
+  assert.match(comparison.textContent ?? "", /other/);
+  const key = [...comparison.querySelectorAll<HTMLInputElement>('input[type="checkbox"]')]
+    .find((input) => input.closest("label")?.textContent === "id");
+  assert.ok(key);
+  await act(async () => key.click());
+  assert.match(comparison.textContent ?? "", /Changed\s*1/);
+  assert.match(comparison.textContent ?? "", /Matching 1/);
+
+  const quality = [...comparison.querySelectorAll("summary")].find((item) => item.textContent === "Column quality changes");
+  assert.ok(quality);
+  await act(async () => {
+    quality.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  assert.match(comparison.textContent ?? "", /1 → 0/);
+  assert.equal(backend.argsFor("execute_query").length, 2);
 });

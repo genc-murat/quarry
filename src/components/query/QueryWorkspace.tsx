@@ -6,7 +6,7 @@ import { indentUnit } from "@codemirror/language";
 import { EditorState } from "@codemirror/state";
 import { oneDark } from "@codemirror/theme-one-dark";
 import { EditorView } from "@codemirror/view";
-import { Bookmark, ListTree, Play, Save, ScrollText, Square, Star, Terminal } from "lucide-react";
+import { Bookmark, Camera, ListTree, Play, Save, ScrollText, Square, Star, Terminal } from "lucide-react";
 
 import { assistantStatus, type AssistantCall } from "@/lib/assistantStatus";
 import { ipc } from "@/lib/ipc";
@@ -35,11 +35,13 @@ import {
   worst,
 } from "@/lib/statementRisk";
 import type { StatementReading, StatementRepair } from "@/lib/types";
+import type { ResultSample, ResultSnapshot } from "@/lib/resultAnalysis";
 
 import { ObjectInspector } from "@/components/objects/ObjectInspector";
 import { AssistantIndicator } from "@/components/query/AssistantIndicator";
 import { DatabaseSelect } from "@/components/query/DatabaseSelect";
 import { PlanPanel } from "@/components/query/PlanPanel";
+import { ResultAnalysisDialog } from "@/components/query/ResultAnalysisDialog";
 import { StatementRiskBadge } from "@/components/query/StatementRiskBadge";
 import { ResultsGrid } from "@/components/query/ResultsGrid";
 import { Button } from "@/components/ui/button";
@@ -76,6 +78,8 @@ export function QueryWorkspace() {
   const [editorRatio, setEditorRatio] = useState(46);
   const [saveOpen, setSaveOpen] = useState(false);
   const [snippetName, setSnippetName] = useState("");
+  const [snapshots, setSnapshots] = useState<ResultSnapshot[]>([]);
+  const [analysis, setAnalysis] = useState<{ sample: ResultSample | null; trigger: HTMLButtonElement } | null>(null);
   // Where the caret is. Only the statement it sits in reads it, so this is a
   // plain position rather than the selection the Run button needs.
   // The selection only: with an empty one CodeMirror reports its start and end as
@@ -807,6 +811,12 @@ export function QueryWorkspace() {
           Save query
         </Button>
 
+        {snapshots.length ? (
+          <Button size="sm" variant="ghost" onClick={(event) => setAnalysis({ sample: null, trigger: event.currentTarget })}>
+            <Camera className="h-3.5 w-3.5" /> Snapshots <span className="tabular-nums">{snapshots.length}</span>
+          </Button>
+        ) : null}
+
         <div className="flex items-center gap-1.5">
           <span className="text-[11px] text-muted-foreground">Session</span>
           <Select
@@ -912,10 +922,19 @@ export function QueryWorkspace() {
             onSaveChanges={(changes) => saveRowChanges(tab.id, changes)}
             preview={tab.preview}
             onPage={(offset) => void pageObjectData(tab.id, offset)}
+            onAnalyze={(result, trigger) => setAnalysis({ sample: { result, source: tab.resultSource }, trigger })}
             repairFor={repairFor}
           />
         )}
       </div>
+
+      {analysis ? (
+        <ResultAnalysisDialog sample={analysis.sample} snapshots={snapshots} onSnapshotsChange={setSnapshots}
+          onClose={() => {
+            setAnalysis(null);
+            analysis.trigger.focus();
+          }} />
+      ) : null}
 
       <Dialog
         open={saveOpen}

@@ -774,6 +774,13 @@ remembered list is not read on the way in, so nothing about the last session is 
 - **Saved queries** — the query in the editor is saved under a name; it is run, added to a new tab
   or deleted from the `Saved queries` panel. The driver/database hint is stored, and if a suitable
   session is open the query runs on that driver.
+- **Result analysis** — open **Analysis** in a result grid to count NULL, blank, distinct and
+  repeated values by column. Select a count to find the matching rows. To verify a data change,
+  capture a named snapshot, run the follow-up query and open **Compare**. Match on one or more
+  unique, non-NULL columns to see field-level changes, or compare whole rows by value. The
+  comparison also shows changes in column counts and exports row differences as JSON. It works
+  on loaded rows across tabs and connections and marks truncated results and table previews.
+  Snapshots stay in memory until Quarry closes, with room for eight snapshots and 20 MiB total.
 - **SQL scripts and consoles** — right-clicking a connection offers the SQL editor group: **New SQL
   script** opens a file-backed tab, **Open SQL console** a connection-bound one (disabled until the
   connection is open). A *script* is written to a **real `.sql` file** chosen with the native save

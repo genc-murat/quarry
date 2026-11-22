@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   Ban,
   CheckCircle2,
+  Columns3,
   Copy,
   Download,
   Inbox,
@@ -56,6 +57,7 @@ interface Props {
   /** Pagination window for a table preview. */
   preview?: { limit: number; offset: number } | null;
   onPage?: (offset: number) => void;
+  onAnalyze?: (statement: StatementResult, trigger: HTMLButtonElement) => void;
   /**
    * What the local model suggested for a statement that failed — and how to act
    * on it, when the statement can still be put right in the editor. A lookup rather
@@ -75,6 +77,7 @@ export function ResultsGrid({
   onSaveChanges,
   preview = null,
   onPage,
+  onAnalyze,
   repairFor,
 }: Props) {
   const [activeIndex, setActiveIndex] = useState(0);
@@ -289,9 +292,9 @@ export function ResultsGrid({
 
   return (
     <div className="flex h-full min-h-0 flex-col">
-      <div className="flex items-center gap-2 border-b border-border bg-surface/60 px-2 py-1.5">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border bg-surface/60 px-2 py-1.5">
         {statements.length > 1 ? (
-          <div className="flex items-center gap-1">
+          <div className="flex min-w-0 items-center gap-1 overflow-x-auto">
             {statements.map((s, index) => (
               <button
                 key={index}
@@ -330,6 +333,13 @@ export function ResultsGrid({
             ) : null}
             {statement.truncated ? <Badge variant="warning">truncated</Badge> : null}
             <span>{formatDuration(statement.executionMs)}</span>
+            {onAnalyze && !statement.error && (statement.isQuery || statement.columns.length > 0) ? (
+              <Button size="xs" variant="outline" disabled={pendingCount > 0 || saving}
+                title="Profile the loaded rows, capture a snapshot or compare results"
+                onClick={(event) => onAnalyze(statement, event.currentTarget)}>
+                <Columns3 className="h-3.5 w-3.5" /> Analysis
+              </Button>
+            ) : null}
             {statement.columns.length > 0 ? (
               <span className="flex items-center gap-0.5">
                 <Button size="icon-sm" variant="ghost" title="Export CSV" onClick={() => exportRows("csv")}>
@@ -575,7 +585,8 @@ function ResultBody({
             ? "No columns"
             : failed
               ? "Statement failed"
-              : `Statement executed · ${statement.affectedRows ?? 0} rows affected`
+              : statement.isQuery ? "Query returned no columns"
+                : `Statement executed · ${statement.affectedRows ?? 0} rows affected`
         }
       />
     );

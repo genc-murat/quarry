@@ -42,6 +42,7 @@ export function Dialog({
       />
       <div
         role="dialog"
+        aria-label={title}
         aria-modal="true"
         className={cn(
           "animate-fade-in relative z-10 flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl",

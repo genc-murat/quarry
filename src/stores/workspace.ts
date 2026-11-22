@@ -31,6 +31,7 @@ import {
   templateSql,
 } from "@/lib/objects";
 import type { EditSource } from "@/lib/rowEdit";
+import type { ResultSource } from "@/lib/resultAnalysis";
 import { pickScriptPath, scriptName, writeScriptFile } from "@/lib/scriptFiles";
 import {
   mergeSettings,
@@ -155,6 +156,7 @@ export interface QueryTab {
   /** Pagination window for a table preview. */
   preview: { limit: number; offset: number } | null;
   result: QueryResponse | null;
+  resultSource: ResultSource | null;
   /** Latest EXPLAIN output, shown in place of the grid until cleared. */
   plan: QueryResponse | null;
   error: string | null;
@@ -833,6 +835,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       editSource: init?.editSource ?? null,
       preview: init?.preview ?? null,
       result: null,
+      resultSource: null,
       plan: null,
       error: null,
       running: false,
@@ -997,8 +1000,10 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
 
       // The user may have stopped the run while it was in flight; if so the
       // late response must not resurrect the grid.
-      if (get().tabs.find((t) => t.id === id)?.cancelled) {
-        get().updateTab(id, { running: false, result: null, runId: null });
+      const current = get().tabs.find((t) => t.id === id);
+      if (current?.runId !== runId) return;
+      if (current.cancelled) {
+        get().updateTab(id, { running: false, result: null, resultSource: null, runId: null });
         return;
       }
 
@@ -1007,7 +1012,19 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       // tabs plus an inline banner), so the tab-level `error` stays reserved for
       // transport failures. Mirroring a statement error here would replace the
       // whole grid and hide the statements that did succeed.
-      get().updateTab(id, { result, error: null, running: false, runId: null });
+      get().updateTab(id, {
+        result,
+        resultSource: {
+          title: tab.title,
+          connection: session?.name ?? null,
+          database: tab.database ?? session?.server.currentDatabase ?? null,
+          completedAt: Date.now(),
+          preview: tab.preview,
+        },
+        error: null,
+        running: false,
+        runId: null,
+      });
 
       // A database/schema DDL changes what the explorer lists, so re-read it
       // rather than making the user press Refresh.
@@ -1020,8 +1037,10 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     } catch (error) {
       // A stopped run will reject once the server-side cancel lands — that is
       // the expected outcome, not a failure worth showing.
-      if (get().tabs.find((t) => t.id === id)?.cancelled) {
-        get().updateTab(id, { running: false, result: null, runId: null });
+      const current = get().tabs.find((t) => t.id === id);
+      if (current?.runId !== runId) return;
+      if (current.cancelled) {
+        get().updateTab(id, { running: false, result: null, resultSource: null, runId: null });
         return;
       }
       const message = errorMessage(error);
@@ -1100,6 +1119,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       editSource: null,
       preview: null,
       result: null,
+      resultSource: null,
       plan: null,
       error: null,
       running: false,
