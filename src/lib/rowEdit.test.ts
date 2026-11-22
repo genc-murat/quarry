@@ -16,6 +16,7 @@ const source: EditSource = {
   quote: '"',
   columnTypes: {
     id: "bigint",
+    huge: "bigint",
     tenant: "text",
     total: "decimal(12,2)",
     active: "boolean",
@@ -31,6 +32,19 @@ test("numeric columns travel as numbers", () => {
   assert.equal(coerce("1e3", "double precision"), 1000);
   assert.equal(coerce("-7", "int"), -7);
   assert.equal(coerce("7", "INTEGER"), 7); // type matching is case-insensitive
+});
+
+test("bigint values within the JavaScript safe range remain numeric", () => {
+  assert.equal(coerce("42", "bigint"), 42);
+  assert.equal(coerce("9007199254740991", "bigint"), Number.MAX_SAFE_INTEGER);
+});
+
+test("64-bit integer edits remain exact decimal strings outside the JavaScript safe range", () => {
+  assert.equal(coerce("9007199254740993", "bigint"), "9007199254740993");
+  assert.equal(coerce("-9223372036854775808", "BIGINT"), "-9223372036854775808");
+  assert.equal(coerce("18446744073709551615", "bigint unsigned"), "18446744073709551615");
+  assert.equal(coerce("9223372036854775807", "bigserial"), "9223372036854775807");
+  assert.equal(coerce("not-an-integer", "bigint"), "not-an-integer");
 });
 
 test("blank numeric cells become NULL", () => {

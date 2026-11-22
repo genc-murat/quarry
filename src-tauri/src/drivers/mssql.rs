@@ -815,6 +815,7 @@ impl Connection for MssqlConnection {
         Ok(QueryResponse {
             results,
             total_ms: started.elapsed().as_millis() as u64,
+            failed_row: None,
         })
     }
 }
@@ -1055,14 +1056,14 @@ fn decode_cell(row: &Row, index: usize) -> Value {
         }
         Int8 => {
             if let Ok(Some(v)) = row.try_get::<i64, _>(index) {
-                return json!(v);
+                return super::json_i64(v);
             }
         }
         // `Intn` is what an INT column arrives as over the wire; its width
         // decides the Rust type, widest first.
         Intn => {
             if let Ok(Some(v)) = row.try_get::<i64, _>(index) {
-                return json!(v);
+                return super::json_i64(v);
             }
             if let Ok(Some(v)) = row.try_get::<i32, _>(index) {
                 return json!(v);

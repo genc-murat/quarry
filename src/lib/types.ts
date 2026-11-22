@@ -289,8 +289,8 @@ export interface StatementResult {
   columns: ColumnMeta[];
   rows: unknown[][];
   rowCount: number;
-  affectedRows?: number | null;
-  lastInsertId?: number | null;
+  affectedRows?: number | string | null;
+  lastInsertId?: number | string | null;
   executionMs: number;
   truncated: boolean;
   error?: string | null;
@@ -299,6 +299,14 @@ export interface StatementResult {
 export interface QueryResponse {
   results: StatementResult[];
   totalMs: number;
+  /** One-based failed row for partial batches. */
+  failedRow?: number | null;
+}
+
+export interface RowSaveResult {
+  ok: boolean;
+  /** Number of leading row changes confirmed applied by the backend. */
+  completed: number;
 }
 
 export interface TableColumns {

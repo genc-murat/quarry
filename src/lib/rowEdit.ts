@@ -52,6 +52,16 @@ export function coerce(value: string | null, dataType?: string): unknown {
   const base = (dataType ?? "").toLowerCase().split(/[\s(]/)[0];
   if (NUMERIC_TYPES.has(base)) {
     if (value.trim() === "") return null;
+    if (base === "bigint" || base === "bigserial") {
+      try {
+        const integer = BigInt(value.trim());
+        return integer >= BigInt(Number.MIN_SAFE_INTEGER) && integer <= BigInt(Number.MAX_SAFE_INTEGER)
+          ? Number(integer)
+          : integer.toString();
+      } catch {
+        return value;
+      }
+    }
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : value;
   }

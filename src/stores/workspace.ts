@@ -1,7 +1,7 @@
 import { create } from "zustand";
 
 import { dropExplorerSession } from "@/lib/explorerTree";
-import { changesDatabaseSet } from "@/lib/sqlIntent";
+import { changesDatabaseSet, writesWithoutWhere } from "@/lib/sqlIntent";
 import { errorMessage, ipc } from "@/lib/ipc";
 import type {
   ConnectionProfile,
@@ -15,6 +15,7 @@ import type {
   QueryLanguage,
   QueryResponse,
   RowChangeRequest,
+  RowSaveResult,
   SaveConnectionInput,
   SaveSnippetInput,
   SessionInfo,
@@ -343,7 +344,7 @@ interface WorkspaceState {
   loadObjectDetail: (ref: ObjectRef, force?: boolean) => Promise<ObjectDetail | null>;
   invalidateObject: (ref: ObjectRef) => void;
   runObjectAction: (request: ObjectActionRequest) => Promise<boolean>;
-  saveRowChanges: (tabId: string, changes: RowChangeRequest[]) => Promise<boolean>;
+  saveRowChanges: (tabId: string, changes: RowChangeRequest[]) => Promise<RowSaveResult>;
   pageObjectData: (tabId: string, offset: number) => Promise<void>;
   createTable: (request: CreateTableRequest) => Promise<boolean>;
   persistSettings: () => void;
@@ -945,9 +946,8 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     if (!sql) return;
 
     if (get().settings.safety.requireWhereForWrites) {
-      const isWrite = /\b(update|delete)\b/i.test(sql);
-      const scoped = /\bwhere\b/i.test(sql);
-      if (isWrite && !scoped) {
+      const unscopedWrites = writesWithoutWhere(sql);
+      if (unscopedWrites.length > 0) {
         get().pushToast({
           title: "Statement blocked",
           description:
@@ -1280,30 +1280,44 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
   },
 
   saveRowChanges: async (tabId, changes) => {
-    if (changes.length === 0) return true;
+    if (changes.length === 0) return { ok: true, completed: 0 };
     try {
       // One batch call describes each table once instead of once per row.
       const response = await ipc.applyRowChanges(changes);
       const failure = response.results.find((result) => result.error)?.error ?? null;
       if (failure) {
-        get().pushToast({ title: "Row change failed", description: failure, variant: "error" });
-        return false;
+        const completed = Math.max(0, response.results.length - 1);
+        const failedAt = response.failedRow ?? completed + 1;
+        const partial = completed > 0 ? ` Saved ${completed} row${completed === 1 ? "" : "s"}; changes from row ${failedAt} onward remain in the grid for retry.` : " No rows were confirmed saved; changes remain in the grid.";
+        get().pushToast({ title: "Row change failed", description: `${failure}${partial}`, variant: "error" });
+        if (completed > 0) set((state) => ({ objectsRevision: state.objectsRevision + 1 }));
+        return { ok: false, completed };
       }
       get().pushToast({
         title: changes.length === 1 ? "Row saved" : `${changes.length} rows saved`,
         variant: "success",
       });
       set((state) => ({ objectsRevision: state.objectsRevision + 1 }));
-      // Reload the preview so the grid reflects what the server stored.
-      await get().runTab(tabId);
-      return true;
+      // Reload the preview so the grid reflects what the server stored. The
+      // write already succeeded, so a failed refresh must not make the grid
+      // keep the changes and offer to apply them a second time.
+      try {
+        await get().runTab(tabId);
+      } catch (error) {
+        get().pushToast({
+          title: "Saved, but the preview did not reload",
+          description: errorMessage(error),
+          variant: "error",
+        });
+      }
+      return { ok: true, completed: changes.length };
     } catch (error) {
       get().pushToast({
         title: "Row change failed",
         description: errorMessage(error),
         variant: "error",
       });
-      return false;
+      return { ok: false, completed: 0 };
     }
   },
 

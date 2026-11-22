@@ -30,3 +30,5 @@ src-tauri/gen
 # Freebuff local app state
 .freebuff
 .mimosa
+
+.cloud-attachments/

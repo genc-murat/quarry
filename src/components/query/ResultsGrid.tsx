@@ -23,7 +23,7 @@ import type { FailureRepair } from "@/lib/statementRepair";
 import { ContextMenu, type MenuEntry } from "@/components/ui/context-menu";
 import { downloadText, serializeExport } from "@/lib/objects";
 import { buildRowChanges, type CellEdit, type EditSource } from "@/lib/rowEdit";
-import type { QueryResponse, RowChangeRequest, StatementResult } from "@/lib/types";
+import type { QueryResponse, RowChangeRequest, RowSaveResult, StatementResult } from "@/lib/types";
 import { cn, formatDuration } from "@/lib/utils";
 import { useWorkspace } from "@/stores/workspace";
 
@@ -52,7 +52,7 @@ interface Props {
   cancelled: boolean;
   /** Present when this result can be edited row by row (table previews). */
   editSource?: EditSource | null;
-  onSaveChanges?: (changes: RowChangeRequest[]) => Promise<boolean>;
+  onSaveChanges?: (changes: RowChangeRequest[]) => Promise<RowSaveResult>;
   /** Pagination window for a table preview. */
   preview?: { limit: number; offset: number } | null;
   onPage?: (offset: number) => void;
@@ -88,6 +88,7 @@ export function ResultsGrid({
   const [edits, setEdits] = useState<Record<string, unknown>>({});
   const [selected, setSelected] = useState<number[]>([]);
   const [inserts, setInserts] = useState<Record<string, unknown>[]>([]);
+  const [retryChanges, setRetryChanges] = useState<RowChangeRequest[]>([]);
   const [saving, setSaving] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
@@ -111,6 +112,7 @@ export function ResultsGrid({
     setEdits({});
     setSelected([]);
     setInserts([]);
+    setRetryChanges([]);
     setEditing(false);
   }, [result]);
 
@@ -149,12 +151,13 @@ export function ResultsGrid({
           ? "Single-statement results only"
           : "Only SELECT results are editable";
 
-  const pendingCount = Object.keys(edits).length + selected.length + inserts.length;
+  const pendingCount = Object.keys(edits).length + selected.length + inserts.length + retryChanges.length;
 
   function discard() {
     setEdits({});
     setSelected([]);
     setInserts([]);
+    setRetryChanges([]);
   }
 
   function setCell(rowIndex: number, colIndex: number, raw: string) {
@@ -191,7 +194,7 @@ export function ResultsGrid({
       const [rowIndex, colIndex] = key.split(":").map(Number);
       return { rowIndex, column: columnNames[colIndex], value };
     });
-    const changes = buildRowChanges({
+    const newlyBuilt = buildRowChanges({
       source,
       columns: columnNames,
       rows: statement.rows,
@@ -199,16 +202,25 @@ export function ResultsGrid({
       selected,
       inserts,
     });
+    const changes = [...retryChanges, ...newlyBuilt];
     if (changes.length === 0) {
       discard();
       return;
     }
     setSaving(true);
-    const ok = await onSaveChanges(changes);
+    const outcome = await onSaveChanges(changes);
     setSaving(false);
-    if (ok) {
+    if (outcome.ok) {
       discard();
+      setRetryChanges([]);
       setEditing(false);
+    } else if (outcome.completed > 0) {
+      // Preserve the failed row and suffix verbatim, and never resend the
+      // confirmed prefix (which may include updates, deletes or inserts).
+      setRetryChanges(changes.slice(outcome.completed));
+      setEdits({});
+      setSelected([]);
+      setInserts([]);
     }
   }
 
@@ -313,7 +325,7 @@ export function ResultsGrid({
                 {statement.affectedRows ?? 0} affected
               </Badge>
             )}
-            {statement.lastInsertId ? (
+            {statement.lastInsertId !== null && statement.lastInsertId !== undefined && statement.lastInsertId !== 0 && statement.lastInsertId !== "0" ? (
               <Badge variant="muted">insert id {statement.lastInsertId}</Badge>
             ) : null}
             {statement.truncated ? <Badge variant="warning">truncated</Badge> : null}
@@ -394,6 +406,7 @@ export function ResultsGrid({
                     return;
                   }
                   discard();
+                  setRetryChanges([]);
                   setEditing(false);
                 }}
               >
@@ -470,6 +483,7 @@ export function ResultsGrid({
         onConfirm={() => {
           setConfirmDiscard(false);
           discard();
+          setRetryChanges([]);
           setEditing(false);
         }}
       />
@@ -627,6 +641,7 @@ function ResultBody({
                     key={columnIndex}
                     value={row[columnIndex]}
                     width={COLUMN_WIDTH}
+                    dataType={column.dataType ?? undefined}
                     editing={editing}
                     readOnly={primaryKeys.includes(column.name)}
                     pending={edits[`${virtualRow.index}:${columnIndex}`]}
@@ -678,6 +693,7 @@ function ResultBody({
 function Cell({
   value,
   width,
+  dataType,
   editing,
   readOnly,
   pending,
@@ -687,6 +703,7 @@ function Cell({
 }: {
   value: unknown;
   width: number;
+  dataType?: string;
   editing?: boolean;
   readOnly?: boolean;
   pending?: unknown;
@@ -723,7 +740,7 @@ function Cell({
     );
   }
 
-  const numeric = typeof value === "number";
+  const numeric = typeof value === "number" || /^(?:bigint|int8|uint64|int64)/i.test(dataType ?? "");
 
   return (
     <div

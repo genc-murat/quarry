@@ -1220,6 +1220,7 @@ impl Connection for ClickHouseConnection {
             return Ok(QueryResponse {
                 results: vec![],
                 total_ms: 0,
+                failed_row: None,
             });
         }
         if requests.len() > 100 {
@@ -1286,6 +1287,7 @@ impl Connection for ClickHouseConnection {
         Ok(QueryResponse {
             results,
             total_ms: started.elapsed().as_millis() as u64,
+            failed_row: None,
         })
     }
 
@@ -1309,6 +1311,7 @@ impl Connection for ClickHouseConnection {
         Ok(QueryResponse {
             results,
             total_ms: started.elapsed().as_millis() as u64,
+            failed_row: None,
         })
     }
 }
@@ -1477,10 +1480,12 @@ mod tests {
                 crate::models::RowValue {
                     column: "id".into(),
                     value: serde_json::json!(id),
+                    data_type: None,
                 },
                 crate::models::RowValue {
                     column: "display name".into(),
                     value: serde_json::json!(value),
+                    data_type: None,
                 },
             ],
         };

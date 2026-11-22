@@ -13,7 +13,7 @@ use tauri::State;
 use tokio_util::sync::CancellationToken;
 
 use crate::decision::{RankRequest, RankResponse};
-use crate::drivers::Connection;
+use crate::drivers::{row_change_failure_result, Connection};
 use crate::error::DriverError;
 use crate::models::{
     ConnectResult, ConnectionConfig, ConnectionProfile, CreateTableRequest, DatabaseInfo,
@@ -571,6 +571,23 @@ fn prepare_row_change(
             )));
         }
     }
+    // Drivers that bind values need the introspected type for each column.
+    // Overwrite anything the caller supplied so an IPC payload cannot inject
+    // SQL through a cast target.
+    for value in &mut request.values {
+        value.data_type = schema
+            .columns
+            .iter()
+            .find(|column| column.name == value.column)
+            .map(|column| column.data_type.clone());
+    }
+    for key in &mut request.key {
+        key.data_type = schema
+            .columns
+            .iter()
+            .find(|column| column.name == key.column)
+            .map(|column| column.data_type.clone());
+    }
     match request.kind {
         RowChangeKind::Insert => {
             // Let the server assign auto-increment keys the grid left blank.
@@ -684,12 +701,20 @@ pub async fn apply_row_changes(
     }
 
     let started = std::time::Instant::now();
-    let mut results = Vec::new();
+    let mut results = Vec::with_capacity(requests.len());
+    let mut failed_row = None;
     let mut schemas: std::collections::HashMap<String, ObjectSchema> =
         std::collections::HashMap::new();
 
-    for mut request in requests {
-        let conn = connection(&state, &request.connection_id).await?;
+    for (row_index, mut request) in requests.into_iter().enumerate() {
+        let conn = match connection(&state, &request.connection_id).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                failed_row = Some(row_index + 1);
+                results.push(row_change_failure_result(row_index, error));
+                break;
+            }
+        };
         let key = format!(
             "{}|{}|{}|{}",
             request.connection_id,
@@ -698,62 +723,53 @@ pub async fn apply_row_changes(
             request.object
         );
         if !schemas.contains_key(&key) {
-            let schema = conn
+            match conn
                 .describe_object(
                     &request.database,
                     request.namespace.as_deref(),
                     &request.object,
                 )
                 .await
-                .map_err(|e| e.to_string())?;
-            schemas.insert(key.clone(), schema);
+            {
+                Ok(schema) => {
+                    schemas.insert(key.clone(), schema);
+                }
+                Err(error) => {
+                    failed_row = Some(row_index + 1);
+                    results.push(row_change_failure_result(row_index, error.to_string()));
+                    break;
+                }
+            }
         }
-        prepare_row_change(&schemas[&key], &mut request).map_err(|e| {
-            format!(
-                "row {} failed after {} successful rows: {e}",
-                results.len() + 1,
-                results.len()
-            )
-        })?;
-        let response = if conn.driver_id() == "clickhouse" && request.kind == RowChangeKind::Insert
-        {
-            // Validation has already resolved the table schema and checked every identifier.
-            // Defer ClickHouse inserts until the full vector can use its streaming format API.
-            let response = conn.apply_row_change(request).await.map_err(|e| {
-                format!(
-                    "row {} failed after {} successful rows: {e}",
-                    results.len() + 1,
-                    results.len()
-                )
-            })?;
-            response
-        } else {
-            conn.apply_row_change(request).await.map_err(|e| {
-                format!(
-                    "row {} failed after {} successful rows: {e}",
-                    results.len() + 1,
-                    results.len()
-                )
-            })?
+        if let Err(error) = prepare_row_change(&schemas[&key], &mut request) {
+            failed_row = Some(row_index + 1);
+            results.push(row_change_failure_result(row_index, error.to_string()));
+            break;
+        }
+        let response = match conn.apply_row_change(request).await {
+            Ok(response) => response,
+            Err(error) => {
+                failed_row = Some(row_index + 1);
+                results.push(row_change_failure_result(row_index, error.to_string()));
+                break;
+            }
         };
         if let Some(error) = response
             .results
             .iter()
             .find_map(|result| result.error.as_deref())
         {
-            return Err(format!(
-                "row {} failed after {} successful rows: {error}",
-                results.len() + 1,
-                results.len()
-            ));
+            failed_row = Some(row_index + 1);
+            results.push(row_change_failure_result(row_index, error));
+            break;
         }
         if response.results.len() != 1 {
-            return Err(format!(
-                "row {} returned {} results; expected one after {} successful rows",
-                results.len() + 1,
-                response.results.len(),
-                results.len()
+            failed_row = Some(row_index + 1);
+            results.push(row_change_failure_result(
+                row_index,
+                format!("expected one result, received {}", response.results.len()),
             ));
+            break;
         }
         results.extend(response.results);
     }
@@ -761,6 +777,7 @@ pub async fn apply_row_changes(
     Ok(QueryResponse {
         results,
         total_ms: started.elapsed().as_millis() as u64,
+        failed_row,
     })
 }
 
@@ -850,4 +867,57 @@ pub async fn rank_candidates(
     // command with a borrowed input; an empty ranking is a success, not an
     // error, so the `Ok` arm carries the outcome either way.
     Ok(state.decision.rank(&request).await)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::{ColumnSchema, RowValue};
+
+    fn table() -> ObjectSchema {
+        ObjectSchema {
+            name: "orders".into(),
+            kind: ObjectKind::Table,
+            columns: vec![ColumnSchema {
+                name: "id".into(),
+                data_type: "bigint".into(),
+                nullable: false,
+                default_value: None,
+                is_primary_key: true,
+                is_auto_increment: true,
+                comment: None,
+                ordinal: 1,
+            }],
+            indexes: vec![],
+            foreign_keys: vec![],
+        }
+    }
+
+    #[test]
+    fn prepare_row_change_takes_column_types_from_the_schema() {
+        let mut request = RowChangeRequest {
+            connection_id: "c".into(),
+            database: "shop".into(),
+            namespace: Some("public".into()),
+            object: "orders".into(),
+            kind: RowChangeKind::Update,
+            key: vec![RowValue {
+                column: "id".into(),
+                value: serde_json::json!(1),
+                data_type: Some("text); DROP TABLE orders; --".into()),
+            }],
+            values: vec![RowValue {
+                column: "id".into(),
+                value: serde_json::json!(2),
+                data_type: Some("uuid".into()),
+            }],
+        };
+
+        prepare_row_change(&table(), &mut request).expect("valid row change");
+
+        // A caller-supplied type must never reach the cast that is rendered
+        // into SQL; the introspected schema is the only source.
+        assert_eq!(request.key[0].data_type.as_deref(), Some("bigint"));
+        assert_eq!(request.values[0].data_type.as_deref(), Some("bigint"));
+    }
 }

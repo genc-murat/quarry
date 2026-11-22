@@ -499,6 +499,7 @@ impl Connection for SqliteConnection {
         Ok(QueryResponse {
             results,
             total_ms: started.elapsed().as_millis() as u64,
+            failed_row: None,
         })
     }
 }
@@ -598,7 +599,7 @@ fn decode_cell(row: &SqliteRow, index: usize) -> Value {
     match kind.as_str() {
         "INTEGER" | "INT" | "BIGINT" | "SMALLINT" => {
             if let Ok(value) = row.try_get::<i64, _>(index) {
-                return json!(value);
+                return super::json_i64(value);
             }
         }
         "REAL" | "FLOAT" | "DOUBLE" => {
@@ -614,7 +615,7 @@ fn decode_cell(row: &SqliteRow, index: usize) -> Value {
         _ => {}
     }
     if let Ok(value) = row.try_get::<i64, _>(index) {
-        return json!(value);
+        return super::json_i64(value);
     }
     if let Ok(value) = row.try_get::<f64, _>(index) {
         return json!(value);

@@ -538,6 +538,7 @@ impl Connection for RedisConnection {
         Ok(QueryResponse {
             results,
             total_ms: started.elapsed().as_millis() as u64,
+            failed_row: None,
         })
     }
 }

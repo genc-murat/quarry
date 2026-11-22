@@ -633,6 +633,40 @@ impl Connection for MySqlConnection {
         Ok(QueryResponse {
             results,
             total_ms: started.elapsed().as_millis() as u64,
+            failed_row: None,
+        })
+    }
+
+    async fn execute_parameterized(
+        &self,
+        database: &str,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<QueryResponse> {
+        let pool = self.pool_for(Some(database)).await?;
+        let mut query = sqlx::query(sql);
+        for value in params {
+            query = bind_mysql_value(query, value)?;
+        }
+        let done = query
+            .execute(&pool)
+            .await
+            .map_err(|error| DriverError::Query(error.to_string()))?;
+        Ok(QueryResponse {
+            results: vec![StatementResult {
+                statement: sql.to_string(),
+                is_query: false,
+                columns: vec![],
+                rows: vec![],
+                row_count: 0,
+                affected_rows: Some(done.rows_affected()),
+                last_insert_id: Some(done.last_insert_id()),
+                execution_ms: 0,
+                truncated: false,
+                error: None,
+            }],
+            total_ms: 0,
+            failed_row: None,
         })
     }
 }
@@ -792,23 +826,14 @@ fn decode_cell(row: &MySqlRow, idx: usize) -> Value {
     let name = row.column(idx).type_info().name().to_ascii_uppercase();
     let unsigned = name.contains("UNSIGNED");
 
-    if name.contains("BIGINT") {
+    if name.contains("BIGINT") || name.contains("INT") || name.contains("YEAR") {
         if unsigned {
             if let Ok(v) = row.try_get::<u64, _>(idx) {
-                return json!(v);
+                return super::json_u64(v);
             }
         }
         if let Ok(v) = row.try_get::<i64, _>(idx) {
-            return json!(v);
-        }
-    } else if name.contains("INT") || name.contains("YEAR") {
-        if unsigned {
-            if let Ok(v) = row.try_get::<u64, _>(idx) {
-                return json!(v);
-            }
-        }
-        if let Ok(v) = row.try_get::<i64, _>(idx) {
-            return json!(v);
+            return super::json_i64(v);
         }
     } else if name.contains("FLOAT") || name.contains("DOUBLE") || name.contains("REAL") {
         if let Ok(v) = row.try_get::<f64, _>(idx) {
@@ -835,7 +860,7 @@ fn decode_cell(row: &MySqlRow, idx: usize) -> Value {
         }
     } else if name.contains("BIT") {
         if let Ok(v) = row.try_get::<u64, _>(idx) {
-            return json!(v);
+            return super::json_u64(v);
         }
         if let Ok(v) = row.try_get::<Vec<u8>, _>(idx) {
             return Value::String(format!("0x{}", hex(&v)));
@@ -857,6 +882,33 @@ fn decode_cell(row: &MySqlRow, idx: usize) -> Value {
         };
     }
     Value::Null
+}
+
+fn bind_mysql_value<'q>(
+    query: sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>,
+    value: &Value,
+) -> Result<sqlx::query::Query<'q, sqlx::MySql, sqlx::mysql::MySqlArguments>> {
+    match value {
+        Value::Null => Ok(query.bind(Option::<String>::None)),
+        Value::Bool(value) => Ok(query.bind(*value)),
+        Value::Number(value) if value.is_i64() => Ok(query.bind(
+            value
+                .as_i64()
+                .ok_or_else(|| DriverError::Config("invalid signed integer row value".into()))?,
+        )),
+        Value::Number(value) if value.is_u64() => Ok(query.bind(
+            value
+                .as_u64()
+                .ok_or_else(|| DriverError::Config("invalid unsigned integer row value".into()))?,
+        )),
+        Value::Number(value) => Ok(query.bind(
+            value
+                .as_f64()
+                .ok_or_else(|| DriverError::Config("invalid floating-point row value".into()))?,
+        )),
+        Value::String(value) => Ok(query.bind(value.clone())),
+        value @ (Value::Array(_) | Value::Object(_)) => Ok(query.bind(value.to_string())),
+    }
 }
 
 fn hex(bytes: &[u8]) -> String {

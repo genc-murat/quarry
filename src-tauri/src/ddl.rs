@@ -5,12 +5,15 @@
 //! string literals through [`Dialect::string_literal`] — user supplied names
 //! never reach the server unquoted.
 
+use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use serde_json::Value;
 
 use crate::error::{DriverError, Result};
 use crate::models::{
     ColumnDefinition, CreateTableRequest, IndexDefinition, IndexKind, MaintenanceKind,
-    ObjectAction, ObjectActionRequest, ObjectKind, ObjectSchema, RowChangeRequest, RowValue,
+    ObjectAction, ObjectActionRequest, ObjectKind, ObjectSchema, RowChangeKind, RowChangeRequest,
+    RowValue,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,8 +52,16 @@ impl Dialect {
     }
 
     /// Quote a string literal by doubling embedded single quotes.
+    ///
+    /// PostgreSQL literals use the `E''` form and escape backslashes so the
+    /// result stays a single literal even when a session sets
+    /// `standard_conforming_strings = off`. With plain literals a value such as
+    /// `\'; DROP ...` could otherwise end the literal early in that mode.
     pub fn string_literal(self, value: &str) -> String {
-        format!("'{}'", value.replace('\'', "''"))
+        match self {
+            Dialect::Postgres => format!("E'{}'", value.replace('\\', "\\\\").replace('\'', "''")),
+            _ => format!("'{}'", value.replace('\'', "''")),
+        }
     }
 
     /// The character used to quote identifiers, for UI templates.
@@ -1118,6 +1129,217 @@ fn row_where(key: &[RowValue], dialect: Dialect) -> Result<String> {
         .join(" AND "))
 }
 
+/// Build a row-change statement with positional placeholders and ordered values.
+/// MySQL and PostgreSQL use this form so SQL data remains data regardless of
+/// the server's SQL mode, string-literal rules or column types. PostgreSQL
+/// placeholders carry a cast to the column's introspected type because values
+/// travel as text parameters.
+pub fn row_change_sql_with_params(
+    request: &RowChangeRequest,
+    dialect: Dialect,
+) -> Result<(String, Vec<Value>)> {
+    let table = row_table(request, dialect);
+    let mut params = Vec::new();
+    let sql = match request.kind {
+        RowChangeKind::Insert => {
+            if request.values.is_empty() {
+                return Err(DriverError::Config(
+                    "an insert needs at least one column".into(),
+                ));
+            }
+            let columns = request
+                .values
+                .iter()
+                .map(|entry| dialect.quote(&entry.column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let placeholders = request
+                .values
+                .iter()
+                .map(|entry| push_row_bind(&mut params, dialect, entry))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("INSERT INTO {table} ({columns}) VALUES ({placeholders})")
+        }
+        RowChangeKind::Update => {
+            if request.values.is_empty() {
+                return Err(DriverError::Config("no columns to update".into()));
+            }
+            if request.key.is_empty() {
+                return Err(DriverError::Config(
+                    "a row key is required to target a single row".into(),
+                ));
+            }
+            let sets = request
+                .values
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{} = {}",
+                        dialect.quote(&entry.column),
+                        push_row_bind(&mut params, dialect, entry)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let where_sql = request
+                .key
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{} = {}",
+                        dialect.quote(&entry.column),
+                        push_row_bind(&mut params, dialect, entry)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            format!("UPDATE {table} SET {sets} WHERE {where_sql}")
+        }
+        RowChangeKind::Delete => {
+            if request.key.is_empty() {
+                return Err(DriverError::Config(
+                    "a row key is required to target a single row".into(),
+                ));
+            }
+            let where_sql = request
+                .key
+                .iter()
+                .map(|entry| {
+                    format!(
+                        "{} = {}",
+                        dialect.quote(&entry.column),
+                        push_row_bind(&mut params, dialect, entry)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(" AND ");
+            format!("DELETE FROM {table} WHERE {where_sql}")
+        }
+    };
+    Ok((sql, params))
+}
+
+/// True when every value and key has a column type that can be rendered as a
+/// PostgreSQL cast. A request that fails this check uses the escaped literal
+/// path instead of risking a text parameter with the wrong type.
+pub fn postgres_row_change_is_bindable(request: &RowChangeRequest) -> bool {
+    request
+        .values
+        .iter()
+        .chain(request.key.iter())
+        .all(|entry| {
+            entry
+                .data_type
+                .as_deref()
+                .is_some_and(|data_type| postgres_cast_type(data_type).is_some())
+        })
+}
+
+/// Append one value to the parameter list and render its placeholder.
+fn push_row_bind(params: &mut Vec<Value>, dialect: Dialect, entry: &RowValue) -> String {
+    let index = params.len();
+    params.push(row_parameter_value(dialect, entry));
+    match dialect {
+        Dialect::Postgres => match entry.data_type.as_deref().and_then(postgres_cast_type) {
+            Some(data_type) => format!("CAST(${} AS {data_type})", index + 1),
+            None => format!("${}", index + 1),
+        },
+        _ => "?".to_string(),
+    }
+}
+
+/// Convert a JSON value into the text PostgreSQL receives through the bind.
+fn row_parameter_value(dialect: Dialect, entry: &RowValue) -> Value {
+    if dialect != Dialect::Postgres {
+        return entry.value.clone();
+    }
+    let data_type = entry
+        .data_type
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    if data_type.ends_with("[]") {
+        if let Value::Array(values) = &entry.value {
+            return Value::String(postgres_array_literal(values));
+        }
+    }
+    if (data_type == "bytea" || data_type.ends_with(".bytea")) && entry.value.is_string() {
+        if let Some(encoded) = entry
+            .value
+            .as_str()
+            .and_then(|text| text.strip_prefix("base64:"))
+        {
+            if let Ok(bytes) = BASE64.decode(encoded) {
+                return Value::String(format!("\\x{}", hex(&bytes)));
+            }
+        }
+    }
+    entry.value.clone()
+}
+
+/// Pick the cast target for a PostgreSQL text parameter. Character types cast
+/// to `text`: an explicit cast to `varchar(n)` would silently truncate where
+/// the column assignment would have rejected an overlong value.
+fn postgres_cast_type(data_type: &str) -> Option<String> {
+    let trimmed = data_type.trim();
+    if trimmed.is_empty()
+        || !trimmed.chars().all(|character| {
+            character.is_ascii_alphanumeric()
+                || matches!(
+                    character,
+                    '_' | ' ' | '.' | '"' | '[' | ']' | '(' | ')' | ','
+                )
+        })
+    {
+        return None;
+    }
+    if let Some(element) = trimmed.strip_suffix("[]") {
+        return postgres_cast_type(element).map(|mapped| format!("{mapped}[]"));
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    Some(
+        if lowered.starts_with("character varying")
+            || lowered.starts_with("character(")
+            || lowered == "character"
+            || lowered == "char"
+            || lowered == "bpchar"
+            || lowered == "\"char\""
+        {
+            "text".to_string()
+        } else {
+            trimmed.to_string()
+        },
+    )
+}
+
+/// Render a JSON array as a PostgreSQL array literal, quoted per element so
+/// commas, braces, quotes and backslashes survive the text-to-array cast.
+fn postgres_array_literal(values: &[Value]) -> String {
+    let elements = values
+        .iter()
+        .map(|value| match value {
+            Value::Null => "NULL".to_string(),
+            Value::Bool(value) => value.to_string(),
+            Value::Number(number) => number.to_string(),
+            Value::String(text) => postgres_array_string(text),
+            Value::Array(values) => postgres_array_literal(values),
+            Value::Object(_) => postgres_array_string(&value.to_string()),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{{{elements}}}")
+}
+
+fn postgres_array_string(text: &str) -> String {
+    format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02X}")).collect()
+}
+
 /// `INSERT INTO t (cols) VALUES (...)` for one new row.
 pub fn insert_row_sql(request: &RowChangeRequest, dialect: Dialect) -> Result<String> {
     if request.values.is_empty() {
@@ -1719,10 +1941,12 @@ mod tests {
             key: vec![RowValue {
                 column: "id".into(),
                 value: serde_json::json!(7),
+                data_type: None,
             }],
             values: vec![RowValue {
                 column: "status".into(),
                 value: serde_json::json!("paid"),
+                data_type: None,
             }],
         }
     }
@@ -1737,7 +1961,108 @@ mod tests {
             row_value(&serde_json::json!("it's"), Dialect::MySql),
             "'it''s'"
         );
-        assert_eq!(row_value(&serde_json::json!("x"), Dialect::Postgres), "'x'");
+        assert_eq!(
+            row_value(&serde_json::json!("x"), Dialect::Postgres),
+            "E'x'"
+        );
+    }
+
+    #[test]
+    fn postgres_literals_escape_backslashes_as_well_as_quotes() {
+        // Under `standard_conforming_strings = off` a plain literal could end
+        // early at `\'`; the E-string keeps the whole value inside one literal.
+        assert_eq!(
+            Dialect::Postgres.string_literal("a\\'; DROP TABLE t; --"),
+            "E'a\\\\''; DROP TABLE t; --'"
+        );
+        assert_eq!(Dialect::Postgres.string_literal("it's"), "E'it''s'");
+        assert_eq!(Dialect::MySql.string_literal("it's"), "'it''s'");
+    }
+
+    #[test]
+    fn postgres_row_changes_cast_text_binds_to_column_types() {
+        let mut req = row_request(RowChangeKind::Update);
+        req.values[0].data_type = Some("character varying(20)".into());
+        req.key[0].data_type = Some("bigint".into());
+        assert!(postgres_row_change_is_bindable(&req));
+        let (sql, params) = row_change_sql_with_params(&req, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            "UPDATE \"public\".\"orders\" SET \"status\" = CAST($1 AS text) WHERE \"id\" = CAST($2 AS bigint)"
+        );
+        assert_eq!(
+            params,
+            vec![serde_json::json!("paid"), serde_json::json!(7)]
+        );
+    }
+
+    #[test]
+    fn postgres_row_parameters_encode_arrays_and_bytea() {
+        let mut req = row_request(RowChangeKind::Insert);
+        req.values = vec![
+            RowValue {
+                column: "tags".into(),
+                value: serde_json::json!(["a,b", "c\"d", "e\\f", null]),
+                data_type: Some("text[]".into()),
+            },
+            RowValue {
+                column: "payload".into(),
+                value: serde_json::json!("base64:3q2+7w=="),
+                data_type: Some("bytea".into()),
+            },
+            RowValue {
+                column: "doc".into(),
+                value: serde_json::json!({ "a": 1 }),
+                data_type: Some("jsonb".into()),
+            },
+            RowValue {
+                column: "qty".into(),
+                value: serde_json::json!(7),
+                data_type: Some("integer".into()),
+            },
+        ];
+        let (sql, params) = row_change_sql_with_params(&req, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            "INSERT INTO \"public\".\"orders\" (\"tags\", \"payload\", \"doc\", \"qty\") VALUES (CAST($1 AS text[]), CAST($2 AS bytea), CAST($3 AS jsonb), CAST($4 AS integer))"
+        );
+        assert_eq!(
+            params[0],
+            serde_json::json!("{\"a,b\",\"c\\\"d\",\"e\\\\f\",NULL}")
+        );
+        assert_eq!(params[1], serde_json::json!("\\xDEADBEEF"));
+        assert_eq!(params[2], serde_json::json!({ "a": 1 }));
+        assert_eq!(params[3], serde_json::json!(7));
+    }
+
+    #[test]
+    fn postgres_casts_reject_unsafe_column_types() {
+        let mut req = row_request(RowChangeKind::Update);
+        req.values[0].data_type = Some("text); DROP TABLE orders; --".into());
+        req.key[0].data_type = Some("bigint".into());
+        assert!(!postgres_row_change_is_bindable(&req));
+        let (sql, _) = row_change_sql_with_params(&req, Dialect::Postgres).unwrap();
+        assert_eq!(
+            sql,
+            "UPDATE \"public\".\"orders\" SET \"status\" = $1 WHERE \"id\" = CAST($2 AS bigint)"
+        );
+        assert!(!sql.contains("DROP"));
+    }
+
+    #[test]
+    fn parameterized_row_change_keeps_values_out_of_sql_and_orders_binds() {
+        let mut req = row_request(RowChangeKind::Update);
+        req.key[0].value = serde_json::json!("\\\\' OR 1=1 -- ");
+        let (sql, params) = row_change_sql_with_params(&req, Dialect::MySql).unwrap();
+        assert_eq!(
+            sql,
+            "UPDATE `public`.`orders` SET `status` = ? WHERE `id` = ?"
+        );
+        assert_eq!(
+            params,
+            vec![serde_json::json!("paid"), req.key[0].value.clone()]
+        );
+        assert!(!sql.contains("OR 1=1"));
     }
 
     #[test]

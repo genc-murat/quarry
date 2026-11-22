@@ -30,11 +30,12 @@ export function ImportDialog({ open, onClose, objectRef, detail, dialect }: Prop
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const [retryRequests, setRetryRequests] = useState<RowChangeRequest[] | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (!open) return;
-    setFormat("csv"); setText(""); setHeader(true); setParsed(null); setParseError(""); setMapping({}); setBusy(false); setConfirm(false);
+    setFormat("csv"); setText(""); setHeader(true); setParsed(null); setParseError(""); setMapping({}); setBusy(false); setConfirm(false); setRetryRequests(null);
   }, [open]);
 
   const mapped = useMemo(() => parsed?.columns.filter((source) => mapping[source]).length ?? 0, [parsed, mapping]);
@@ -46,10 +47,11 @@ export function ImportDialog({ open, onClose, objectRef, detail, dialect }: Prop
     const nextFormat = /\.json$/i.test(file.name) ? "json" : "csv";
     setFormat(nextFormat);
     setText(await file.text());
-    setParsed(null); setParseError(""); setMapping({});
+    setParsed(null); setParseError(""); setMapping({}); setRetryRequests(null);
   }
 
   function preview() {
+    setRetryRequests(null);
     try {
       const result = parseImport(text, format, header);
       const initial: Record<string, string> = {};
@@ -77,12 +79,15 @@ export function ImportDialog({ open, onClose, objectRef, detail, dialect }: Prop
     });
   };
 
-  const importableCount = rowRequests().filter((request) => request.values.length > 0).length;
-  const emptyRowCount = parsed ? parsed.rows.length - importableCount : 0;
+  const importableRequests = rowRequests().filter((request) => request.values.length > 0);
+  const requestsToImport = retryRequests ?? importableRequests;
+  const importableCount = requestsToImport.length;
+  const emptyRowCount = parsed && retryRequests === null ? parsed.rows.length - importableCount : 0;
 
   async function runImport() {
-    const requests = rowRequests().filter((request) => request.values.length > 0);
+    const requests = requestsToImport;
     if (requests.length === 0) return;
+    let completed = 0;
     setBusy(true);
     try {
       // Execute in batches to keep IPC payloads bounded. Each row remains an
@@ -92,21 +97,33 @@ export function ImportDialog({ open, onClose, objectRef, detail, dialect }: Prop
         const response = await ipc.applyRowChanges(batch);
         const expected = Math.min(100, requests.length - start);
         const failure = response.results.find((result) => result.error)?.error;
-        if (failure) throw new Error(`Import stopped after ${start} rows: ${failure}`);
+        if (failure) {
+          // `failedRow` is one-based and every successful row precedes the
+          // failure result, so only that confirmed prefix leaves the retry.
+          const failedAt = response.failedRow ?? response.results.length;
+          completed += Math.min(expected, Math.max(0, failedAt - 1));
+          throw new Error(`Import stopped after ${completed} confirmed rows: ${failure}`);
+        }
         if (response.results.length !== expected) {
-          throw new Error(`Import stopped after ${start} rows: expected ${expected} results, received ${response.results.length}`);
+          throw new Error(`Import stopped after ${completed} confirmed rows: expected ${expected} results, received ${response.results.length}`);
         }
         if (dialect === "clickhouse") {
-          const inserted = response.results.reduce((sum, result) => sum + (result.affectedRows ?? 0), 0);
+          const inserted = response.results.reduce((sum, result) => sum + Number(result.affectedRows ?? 0), 0);
           if (inserted !== expected) {
             throw new Error(`ClickHouse import batch reported ${inserted} inserted rows; expected ${expected}`);
           }
         }
+        completed += expected;
       }
       pushToast({ title: "Import complete", description: `${requests.length} rows inserted`, variant: "success" });
       onClose();
     } catch (error) {
-      pushToast({ title: "Import failed", description: errorMessage(error), variant: "error" });
+      const remaining = requests.slice(completed);
+      setRetryRequests(remaining);
+      const status = completed > 0
+        ? ` ${completed} rows were confirmed inserted and removed from the retry batch; ${remaining.length} remain. The batch with the failure may have been partially applied, so review the remaining rows before retrying.`
+        : " No rows were confirmed inserted; the current batch remains. Its outcome may be uncertain, so it was not retried automatically.";
+      pushToast({ title: "Import failed", description: `${errorMessage(error)}${status}`, variant: "error" });
     } finally {
       setBusy(false); setConfirm(false);
     }
@@ -124,11 +141,11 @@ export function ImportDialog({ open, onClose, objectRef, detail, dialect }: Prop
         <div className="flex flex-wrap items-center gap-2">
           <Button variant="outline" size="sm" onClick={() => fileInput.current?.click()}><FileUp className="h-3.5 w-3.5" />Choose CSV/JSON</Button>
           <input ref={fileInput} type="file" accept=".csv,.json,text/csv,application/json" className="hidden" onChange={(event) => void loadFile(event.target.files?.[0])} />
-          <Select aria-label="Import format" className="h-8 w-28 text-xs" value={format} onChange={(event) => { setFormat(event.target.value as ImportFormat); setParsed(null); }}><option value="csv">CSV</option><option value="json">JSON</option></Select>
-          {format === "csv" ? <Checkbox label="First row contains headers" checked={header} onChange={(event) => { setHeader(event.target.checked); setParsed(null); }} /> : null}
+          <Select aria-label="Import format" className="h-8 w-28 text-xs" value={format} onChange={(event) => { setFormat(event.target.value as ImportFormat); setParsed(null); setRetryRequests(null); }}><option value="csv">CSV</option><option value="json">JSON</option></Select>
+          {format === "csv" ? <Checkbox label="First row contains headers" checked={header} onChange={(event) => { setHeader(event.target.checked); setParsed(null); setRetryRequests(null); }} /> : null}
           <span className="ml-auto text-[10px] text-muted-foreground">10 MB · 10,000 rows max</span>
         </div>
-        <Textarea aria-label="Import file contents" value={text} onChange={(event) => { setText(event.target.value); setParsed(null); }} placeholder={format === "csv" ? "id,name\n1,Ada" : '[{"id":1,"name":"Ada"}]'} className="min-h-32 resize-y" />
+        <Textarea aria-label="Import file contents" value={text} onChange={(event) => { setText(event.target.value); setParsed(null); setRetryRequests(null); }} placeholder={format === "csv" ? "id,name\n1,Ada" : '[{"id":1,"name":"Ada"}]'} className="min-h-32 resize-y" />
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" onClick={preview} disabled={!text.trim()}>Parse preview</Button>
           {parseError ? <span className="text-xs text-destructive">{parseError}</span> : null}
@@ -136,11 +153,11 @@ export function ImportDialog({ open, onClose, objectRef, detail, dialect }: Prop
         {parsed ? <>
           <div className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] gap-2 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground"><span>Source ({parsed.columns.length}) → target mapping ({mapped})</span><span>Preview · {parsed.rows.length} rows</span></div>
           <div className="grid max-h-64 grid-cols-1 gap-3 overflow-auto md:grid-cols-2">
-            <div className="space-y-1">{parsed.columns.map((source) => <div key={source} className="grid grid-cols-2 items-center gap-2 rounded border border-border px-2 py-1"><span className="truncate font-mono text-xs">{source}</span><Select aria-label={`Map ${source}`} className="h-7 text-[11px]" value={mapping[source] ?? ""} onChange={(event) => setMapping((current) => ({ ...current, [source]: event.target.value }))}><option value="">Skip column</option>{detail.schema.columns.map((column) => <option key={column.name} value={column.name}>{formatTypes(column)}</option>)}</Select></div>)}</div>
+            <div className="space-y-1">{parsed.columns.map((source) => <div key={source} className="grid grid-cols-2 items-center gap-2 rounded border border-border px-2 py-1"><span className="truncate font-mono text-xs">{source}</span><Select aria-label={`Map ${source}`} className="h-7 text-[11px]" value={mapping[source] ?? ""} onChange={(event) => { setMapping((current) => ({ ...current, [source]: event.target.value })); setRetryRequests(null); }}><option value="">Skip column</option>{detail.schema.columns.map((column) => <option key={column.name} value={column.name}>{formatTypes(column)}</option>)}</Select></div>)}</div>
             <div className="overflow-auto rounded border border-border"><table className="w-full text-[10px]"><thead><tr>{parsed.columns.map((column) => <th key={column} className="sticky top-0 bg-surface px-2 py-1 text-left">{column}</th>)}</tr></thead><tbody>{parsed.rows.slice(0, 8).map((row, index) => <tr key={index} className="border-t border-border/50">{row.map((value, columnIndex) => <td key={columnIndex} className="max-w-36 truncate px-2 py-1 font-mono">{value === null ? "NULL" : typeof value === "object" ? JSON.stringify(value) : String(value)}</td>)}</tr>)}</tbody></table></div>
           </div>
         </> : null}
-      </> : <div className="space-y-3"><div className="rounded-lg border border-warning/40 bg-warning/5 p-3 text-xs"><p className="font-semibold">Confirm import</p><p className="mt-1 text-muted-foreground">This will attempt to insert {importableCount} rows into {objectRef.database}.{objectRef.object}. {emptyRowCount ? `${emptyRowCount} rows with no mapped values will be skipped. ` : ""}Unmapped source fields are skipped. Generated target columns not mapped are left to the database.</p></div><div className="max-h-48 overflow-auto rounded border border-border p-2"><pre className="whitespace-pre-wrap font-mono text-[10px]">{rowRequests().filter((request) => request.values.length > 0).slice(0, 12).map((request) => JSON.stringify(request.values)).join("\n")}{importableCount > 12 ? `\n… ${importableCount - 12} more rows` : ""}</pre></div>        <p className="text-[10px] text-muted-foreground">Dialect: {dialect}. Every row is validated against the table before it is sent, in batches of up to 100 rows.</p></div>}
+      </> : <div className="space-y-3"><div className="rounded-lg border border-warning/40 bg-warning/5 p-3 text-xs"><p className="font-semibold">Confirm import</p><p className="mt-1 text-muted-foreground">This will attempt to insert {importableCount} rows into {objectRef.database}.{objectRef.object}. {retryRequests ? "This retry contains only rows not confirmed inserted by the previous attempt. " : ""} {emptyRowCount ? `${emptyRowCount} rows with no mapped values will be skipped. ` : ""}Unmapped source fields are skipped. Generated target columns not mapped are left to the database.</p></div><div className="max-h-48 overflow-auto rounded border border-border p-2"><pre className="whitespace-pre-wrap font-mono text-[10px]">{requestsToImport.slice(0, 12).map((request) => JSON.stringify(request.values)).join("\n")}{importableCount > 12 ? `\n… ${importableCount - 12} more rows` : ""}</pre></div>        <p className="text-[10px] text-muted-foreground">Dialect: {dialect}. Every row is validated against the table before it is sent, in batches of up to 100 rows.</p></div>}
     </div>
   </Dialog>;
 }

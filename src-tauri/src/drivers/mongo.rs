@@ -469,6 +469,7 @@ impl Connection for MongoConnection {
         Ok(QueryResponse {
             results,
             total_ms: started.elapsed().as_millis() as u64,
+            failed_row: None,
         })
     }
 }
@@ -870,6 +871,7 @@ fn documents_table(documents: &[Document], max_rows: usize) -> Table {
                         .get(name)
                         .cloned()
                         .map(Bson::into_relaxed_extjson)
+                        .map(safe_bson_integers)
                         .unwrap_or(Value::Null)
                 })
                 .collect()
@@ -883,10 +885,44 @@ fn documents_table(documents: &[Document], max_rows: usize) -> Table {
     }
 }
 
+fn safe_bson_integers(value: Value) -> Value {
+    match value {
+        Value::Number(number) => {
+            if let Some(integer) = number.as_i64() {
+                super::json_i64(integer)
+            } else if let Some(integer) = number.as_u64() {
+                super::json_u64(integer)
+            } else {
+                Value::Number(number)
+            }
+        }
+        Value::Array(values) => Value::Array(values.into_iter().map(safe_bson_integers).collect()),
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, safe_bson_integers(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::models::{ObjectAction, ObjectKind};
+
+    #[test]
+    fn bson_integer_values_are_exact_across_json_boundary() {
+        assert_eq!(
+            safe_bson_integers(json!(9_007_199_254_740_992_i64)),
+            json!("9007199254740992")
+        );
+        assert_eq!(
+            safe_bson_integers(json!({ "nested": [9_007_199_254_740_992_u64] })),
+            json!({ "nested": ["9007199254740992"] })
+        );
+    }
 
     fn config(host: &str, port: u16, db: Option<&str>, ssl: SslMode) -> ConnectionConfig {
         ConnectionConfig {

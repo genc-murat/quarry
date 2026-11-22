@@ -336,11 +336,12 @@ pub struct StatementResult {
     pub statement: String,
     pub is_query: bool,
     pub columns: Vec<ColumnMeta>,
+    #[serde(serialize_with = "serialize_safe_rows")]
     pub rows: Vec<Vec<Value>>,
     pub row_count: usize,
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_safe_u64")]
     pub affected_rows: Option<u64>,
-    #[serde(default)]
+    #[serde(default, serialize_with = "serialize_safe_u64")]
     pub last_insert_id: Option<u64>,
     pub execution_ms: u64,
     pub truncated: bool,
@@ -348,11 +349,122 @@ pub struct StatementResult {
     pub error: Option<String>,
 }
 
+fn serialize_safe_u64<S>(value: &Option<u64>, serializer: S) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(value) if *value > 9_007_199_254_740_991 => {
+            serializer.serialize_some(&value.to_string())
+        }
+        Some(value) => serializer.serialize_some(value),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn serialize_safe_rows<S>(
+    rows: &[Vec<Value>],
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    fn safe_value(value: &Value) -> Value {
+        match value {
+            Value::Number(number) => {
+                if let Some(value) = number.as_i64() {
+                    if !(-9_007_199_254_740_991..=9_007_199_254_740_991).contains(&value) {
+                        return Value::String(value.to_string());
+                    }
+                } else if let Some(value) = number.as_u64() {
+                    if value > 9_007_199_254_740_991 {
+                        return Value::String(value.to_string());
+                    }
+                }
+                value.clone()
+            }
+            Value::Array(values) => Value::Array(values.iter().map(safe_value).collect()),
+            Value::Object(values) => Value::Object(
+                values
+                    .iter()
+                    .map(|(key, value)| (key.clone(), safe_value(value)))
+                    .collect(),
+            ),
+            _ => value.clone(),
+        }
+    }
+
+    let safe_rows = rows
+        .iter()
+        .map(|row| row.iter().map(safe_value).collect::<Vec<_>>())
+        .collect::<Vec<_>>();
+    safe_rows.serialize(serializer)
+}
+
+#[cfg(test)]
+mod row_value_tests {
+    use super::RowValue;
+    use serde_json::json;
+
+    #[test]
+    fn frontend_payloads_without_a_column_type_still_deserialize() {
+        let value: RowValue =
+            serde_json::from_value(json!({ "column": "id", "value": 1 })).unwrap();
+        assert_eq!(value.column, "id");
+        assert!(value.data_type.is_none());
+    }
+}
+
+#[cfg(test)]
+mod statement_result_tests {
+    use super::StatementResult;
+    use serde_json::{json, Value};
+
+    fn statement(
+        rows: Vec<Vec<Value>>,
+        affected_rows: Option<u64>,
+        last_insert_id: Option<u64>,
+    ) -> StatementResult {
+        StatementResult {
+            statement: "SELECT 1".into(),
+            is_query: true,
+            columns: vec![],
+            rows,
+            row_count: 0,
+            affected_rows,
+            last_insert_id,
+            execution_ms: 0,
+            truncated: false,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn result_serialization_keeps_64_bit_integers_exact_for_javascript() {
+        let value = statement(
+            vec![vec![
+                json!(9_007_199_254_740_992_u64),
+                json!(-9_007_199_254_740_992_i64),
+            ]],
+            Some(9_007_199_254_740_992),
+            Some(u64::MAX),
+        );
+        let serialized = serde_json::to_value(value).unwrap();
+        assert_eq!(serialized["rows"][0][0], json!("9007199254740992"));
+        assert_eq!(serialized["rows"][0][1], json!("-9007199254740992"));
+        assert_eq!(serialized["affectedRows"], json!("9007199254740992"));
+        assert_eq!(serialized["lastInsertId"], json!(u64::MAX.to_string()));
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct QueryResponse {
     pub results: Vec<StatementResult>,
     pub total_ms: u64,
+    /// One-based row that failed in a partial batch; successful results precede it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failed_row: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -710,6 +822,11 @@ pub enum RowChangeKind {
 pub struct RowValue {
     pub column: String,
     pub value: Value,
+    /// Introspected column type, filled by the backend before execution so a
+    /// driver can bind the value with the right PostgreSQL cast. Frontend
+    /// payloads omit it; the server never trusts a caller-supplied type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_type: Option<String>,
 }
 
 /// A single-row edit coming from the results grid. The backend renders it as

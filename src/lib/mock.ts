@@ -476,7 +476,7 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
         applyRowChange(request);
         return changeResponse(request.kind).results;
       });
-      return respond({ results, totalMs: 2 } satisfies QueryResponse);
+      return respond({ results, totalMs: 2, failedRow: null } satisfies QueryResponse);
     }
     case "create_table": {
       const request = (args?.request as CreateTableRequest) ?? { table: "table" };

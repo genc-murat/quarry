@@ -26,8 +26,48 @@ use crate::models::{
     DatabaseObject, DriverCapabilities, DriverDescriptor, ForeignKeySchema, IndexSchema,
     InspectorSection, NamespaceInfo, ObjectAction, ObjectActionRequest, ObjectKind, ObjectSchema,
     QueryRequest, QueryResponse, RowChangeKind, RowChangeRequest, SectionActionRequest,
-    SectionRequest, ServerInfo, TableColumns,
+    SectionRequest, ServerInfo, StatementResult, TableColumns,
 };
+
+const MAX_SAFE_JSON_INTEGER: i64 = 9_007_199_254_740_991;
+
+/// Keep signed 64-bit integers exact across the JSON/JavaScript boundary.
+pub(crate) fn json_i64(value: i64) -> serde_json::Value {
+    if (-MAX_SAFE_JSON_INTEGER..=MAX_SAFE_JSON_INTEGER).contains(&value) {
+        serde_json::json!(value)
+    } else {
+        serde_json::Value::String(value.to_string())
+    }
+}
+
+/// Keep unsigned 64-bit integers exact across the JSON/JavaScript boundary.
+pub(crate) fn json_u64(value: u64) -> serde_json::Value {
+    if value <= MAX_SAFE_JSON_INTEGER as u64 {
+        serde_json::json!(value)
+    } else {
+        serde_json::Value::String(value.to_string())
+    }
+}
+
+/// A batch error result lets the caller retain completed rows and retry only
+/// the request that failed and those that were not attempted.
+pub(crate) fn row_change_failure_result(
+    row_index: usize,
+    error: impl Into<String>,
+) -> StatementResult {
+    StatementResult {
+        statement: format!("row change {}", row_index + 1),
+        is_query: false,
+        columns: vec![],
+        rows: vec![],
+        row_count: 0,
+        affected_rows: None,
+        last_insert_id: None,
+        execution_ms: 0,
+        truncated: false,
+        error: Some(error.into()),
+    }
+}
 
 /// A database engine (MySQL, PostgreSQL, ...).
 #[async_trait]
@@ -299,10 +339,31 @@ pub trait Connection: Send + Sync {
         .await
     }
 
+    /// Execute values separately from a statement using the driver's binding
+    /// protocol. Drivers without positional binds return an explicit error.
+    async fn execute_parameterized(
+        &self,
+        _database: &str,
+        _sql: &str,
+        _params: &[serde_json::Value],
+    ) -> Result<QueryResponse> {
+        Err(DriverError::Unsupported(
+            "this driver does not support parameterized row changes".into(),
+        ))
+    }
+
     /// Apply a single-row insert/update/delete from the results grid. The
-    /// default builds dialect SQL with the [`ddl`] row helpers and runs it, so
-    /// SQL adapters need no extra code.
+    /// default uses bound values for MySQL and PostgreSQL (the latter needs
+    /// introspected column types for its casts) and dialect SQL for the rest.
     async fn apply_row_change(&self, request: RowChangeRequest) -> Result<QueryResponse> {
+        let parameterized = self.driver_id() == "mysql"
+            || (self.driver_id() == "postgres" && ddl::postgres_row_change_is_bindable(&request));
+        if parameterized {
+            let (sql, params) = ddl::row_change_sql_with_params(&request, self.dialect())?;
+            return self
+                .execute_parameterized(&request.database, &sql, &params)
+                .await;
+        }
         let sql = match request.kind {
             RowChangeKind::Insert => ddl::insert_row_sql(&request, self.dialect())?,
             RowChangeKind::Update => ddl::update_row_sql(&request, self.dialect())?,
@@ -323,20 +384,47 @@ pub trait Connection: Send + Sync {
     async fn apply_row_changes(&self, requests: Vec<RowChangeRequest>) -> Result<QueryResponse> {
         let started = std::time::Instant::now();
         let mut results = Vec::with_capacity(requests.len());
-        for request in requests {
-            let response = self.apply_row_change(request).await?;
+        let mut failed_row = None;
+        for (row_index, request) in requests.into_iter().enumerate() {
+            let response = match self.apply_row_change(request).await {
+                Ok(response) => response,
+                Err(error) => {
+                    failed_row = Some(row_index + 1);
+                    results.push(row_change_failure_result(row_index, error.to_string()));
+                    break;
+                }
+            };
             if let Some(error) = response
                 .results
                 .iter()
                 .find_map(|item| item.error.as_deref())
             {
-                return Err(DriverError::Query(error.to_string()));
+                failed_row = Some(row_index + 1);
+                results.push(row_change_failure_result(row_index, error));
+                break;
             }
-            results.extend(response.results);
+            if response.results.len() != 1 {
+                failed_row = Some(row_index + 1);
+                results.push(row_change_failure_result(
+                    row_index,
+                    format!(
+                        "expected one row result, received {}",
+                        response.results.len()
+                    ),
+                ));
+                break;
+            }
+            let result = response
+                .results
+                .into_iter()
+                .next()
+                .expect("one result checked");
+            results.push(result);
         }
         Ok(QueryResponse {
             results,
             total_ms: started.elapsed().as_millis() as u64,
+            failed_row,
         })
     }
 
@@ -464,7 +552,9 @@ pub fn explain_sql(statement: &str) -> String {
 /// anything unrecognised is `Other`.
 pub fn object_kind_from_marker(marker: &str) -> ObjectKind {
     match marker.trim().to_ascii_uppercase().as_str() {
-        "TABLE" | "BASE TABLE" | "FOREIGN TABLE" => ObjectKind::Table,
+        "TABLE" | "BASE TABLE" | "FOREIGN" | "FOREIGN TABLE" | "LOCAL TEMPORARY" => {
+            ObjectKind::Table
+        }
         "VIEW" | "SYSTEM VIEW" => ObjectKind::View,
         "MATERIALIZED VIEW" => ObjectKind::MaterializedView,
         "COLLECTION" => ObjectKind::Collection,
@@ -508,7 +598,10 @@ mod tests {
 
     use serde_json::{json, Value};
 
-    use super::{explain_sql, object_kind_from_marker, DriverRegistry};
+    use super::{
+        explain_sql, json_i64, json_u64, object_kind_from_marker, row_change_failure_result,
+        DriverRegistry,
+    };
     use crate::ddl::Dialect;
     use crate::models::ObjectKind;
 
@@ -602,6 +695,29 @@ mod tests {
     }
 
     #[test]
+    fn json_integer_helpers_keep_values_outside_javascript_safe_range_as_strings() {
+        assert_eq!(
+            json_i64(9_007_199_254_740_991),
+            json!(9_007_199_254_740_991_i64)
+        );
+        assert_eq!(json_i64(9_007_199_254_740_992), json!("9007199254740992"));
+        assert_eq!(json_i64(i64::MIN), json!(i64::MIN.to_string()));
+        assert_eq!(
+            json_u64(9_007_199_254_740_991),
+            json!(9_007_199_254_740_991_u64)
+        );
+        assert_eq!(json_u64(9_007_199_254_740_992), json!("9007199254740992"));
+        assert_eq!(json_u64(u64::MAX), json!(u64::MAX.to_string()));
+    }
+
+    #[test]
+    fn partial_batch_failure_marks_failed_row_after_preserving_success_prefix() {
+        let response = row_change_failure_result(2, "row rejected");
+        assert_eq!(response.statement, "row change 3");
+        assert_eq!(response.error.as_deref(), Some("row rejected"));
+    }
+
+    #[test]
     fn explain_prefixes_and_trims_semicolons() {
         assert_eq!(explain_sql("SELECT 1"), "EXPLAIN SELECT 1");
         assert_eq!(explain_sql("  SELECT 1;  "), "EXPLAIN SELECT 1");
@@ -613,6 +729,11 @@ mod tests {
         assert_eq!(object_kind_from_marker("BASE TABLE"), ObjectKind::Table);
         assert_eq!(object_kind_from_marker("TABLE"), ObjectKind::Table);
         assert_eq!(object_kind_from_marker("FOREIGN TABLE"), ObjectKind::Table);
+        assert_eq!(object_kind_from_marker("FOREIGN"), ObjectKind::Table);
+        assert_eq!(
+            object_kind_from_marker("LOCAL TEMPORARY"),
+            ObjectKind::Table
+        );
         assert_eq!(object_kind_from_marker("VIEW"), ObjectKind::View);
         assert_eq!(object_kind_from_marker("SYSTEM VIEW"), ObjectKind::View);
         assert_eq!(
