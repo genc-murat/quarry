@@ -343,6 +343,22 @@ export interface PartitionRequest {
 export interface PartitionPage {
   result: QueryResponse;
   continuation: string | null;
+  diagnostics: PartitionDiagnostics;
+}
+
+export interface PartitionDiagnostics {
+  token: string | null;
+  placement: "tokenRing" | "tablets" | null;
+  coordinator: PartitionNode;
+  replicas: PartitionNode[];
+}
+
+export interface PartitionNode {
+  hostId: string;
+  address: string;
+  datacenter: string | null;
+  rack: string | null;
+  shard: number | null;
 }
 
 export interface ColumnDefinition {

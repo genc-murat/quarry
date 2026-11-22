@@ -11,9 +11,10 @@ use futures_util::TryStreamExt;
 use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::CertificateDer;
 use scylla::client::{session::Session, session_builder::SessionBuilder};
-use scylla::cluster::metadata::{CollectionType, ColumnType, NativeType, Table};
-use scylla::cluster::ClusterState;
-use scylla::response::PagingState;
+use scylla::cluster::metadata::{CollectionType, ColumnType, NativeType, Strategy, Table};
+use scylla::cluster::{ClusterState, Node};
+use scylla::response::{Coordinator, PagingState};
+use scylla::routing::Token;
 use scylla::statement::prepared::PreparedStatement;
 use scylla::statement::unprepared::Statement;
 use scylla::value::{
@@ -29,9 +30,10 @@ use crate::error::{DriverError, Result};
 use crate::models::{
     ColumnMeta, ColumnSchema, ConfigField, ConnectionConfig, DatabaseInfo, DatabaseObject,
     DriverCapabilities, FieldType, InspectorSection, NamespaceInfo, ObjectAction, ObjectKind,
-    ObjectSchema, PartitionKeyValue, PartitionPage, PartitionRequest, QueryLanguage, QueryRequest,
-    QueryResponse, ResultShape, SectionBlock, SectionField, SectionSource, SelectOption,
-    ServerInfo, SslMode, StatementResult, TableColumns,
+    ObjectSchema, PartitionDiagnostics, PartitionKeyValue, PartitionNode, PartitionPage,
+    PartitionPlacement, PartitionRequest, QueryLanguage, QueryRequest, QueryResponse, ResultShape,
+    SectionBlock, SectionField, SectionSource, SelectOption, ServerInfo, SslMode, StatementResult,
+    TableColumns,
 };
 
 const PORT: u16 = 9042;
@@ -328,6 +330,61 @@ struct PartitionCursor {
     selection: PartitionSelection,
     state: PagingState,
     prepared: PreparedStatement,
+}
+
+fn partition_node(node: &Node, address: String, shard: Option<u32>) -> PartitionNode {
+    PartitionNode {
+        host_id: node.host_id,
+        address,
+        datacenter: node.datacenter.clone(),
+        rack: node.rack.clone(),
+        shard,
+    }
+}
+
+fn partition_diagnostics(
+    state: &ClusterState,
+    selection: &PartitionSelection,
+    token: Option<Token>,
+    coordinator: &Coordinator,
+) -> PartitionDiagnostics {
+    let placement = state
+        .get_keyspace(&selection.database)
+        .and_then(|keyspace| {
+            if keyspace.tablet_based {
+                Some(PartitionPlacement::Tablets)
+            } else if matches!(
+                keyspace.strategy,
+                Strategy::SimpleStrategy { .. } | Strategy::NetworkTopologyStrategy { .. }
+            ) {
+                Some(PartitionPlacement::TokenRing)
+            } else {
+                // The driver falls back to RF=1 for unsupported strategies.
+                None
+            }
+        });
+    let replicas = match (token, &placement) {
+        (Some(token), Some(placement)) => state
+            .get_token_endpoints(&selection.database, &selection.table, token)
+            .into_iter()
+            .map(|(node, shard)| {
+                let shard = (placement == &PartitionPlacement::Tablets || node.sharder().is_some())
+                    .then_some(shard);
+                partition_node(&node, node.address.to_string(), shard)
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    PartitionDiagnostics {
+        token: token.map(|token| token.value().to_string()),
+        placement,
+        coordinator: partition_node(
+            coordinator.node(),
+            coordinator.connection_address().to_string(),
+            coordinator.shard(),
+        ),
+        replicas,
+    }
 }
 
 impl CqlConnection {
@@ -699,11 +756,19 @@ impl Connection for CqlConnection {
             prepared.set_page_size(page_size as i32);
             (prepared, PagingState::start())
         };
+        let bound = prepared.bind(&values).map_err(query_error)?;
+        let token = bound.calculate_token().ok().flatten();
         let (page, next) = self
             .session
-            .execute_single_page(&prepared, values, paging_state)
+            .execute_bound_single_page(&bound, paging_state)
             .await
             .map_err(query_error)?;
+        let diagnostics = partition_diagnostics(
+            &self.session.get_cluster_state(),
+            &selection,
+            token,
+            page.request_coordinator(),
+        );
         let page = page.into_rows_result().map_err(query_error)?;
         let columns = page
             .column_specs()
@@ -721,7 +786,7 @@ impl Connection for CqlConnection {
             .map(|row| row.map(row_values).map_err(query_error))
             .collect::<Result<Vec<_>>>()?;
         let result = result_table(
-            prepared.get_statement().into(),
+            bound.prepared().get_statement().into(),
             columns,
             rows,
             started,
@@ -737,7 +802,7 @@ impl Connection for CqlConnection {
                     PartitionCursor {
                         selection,
                         state,
-                        prepared,
+                        prepared: bound.prepared().clone(),
                     },
                 ));
                 if cursors.len() > MAX_CURSORS {
@@ -749,6 +814,7 @@ impl Connection for CqlConnection {
         Ok(PartitionPage {
             result,
             continuation,
+            diagnostics,
         })
     }
 
@@ -1063,6 +1129,7 @@ mod tests {
             .expect("set QUARRY_CQL_TEST_PORT to a disposable localhost database")
             .parse()
             .unwrap();
+        let test_tablets = std::env::var_os("QUARRY_CQL_TEST_TABLETS").is_some();
         let config = ConnectionConfig {
             driver: "cql".into(),
             host: "127.0.0.1".into(),
@@ -1083,18 +1150,23 @@ mod tests {
         let (settings, _) = Settings::new(&config).await.unwrap();
         let seed = settings.open(None).await.unwrap();
         let local = seed
-            .query_unpaged("SELECT data_center FROM system.local", &[])
+            .query_unpaged("SELECT host_id, data_center, rack FROM system.local", &[])
             .await
             .unwrap()
             .into_rows_result()
             .unwrap();
-        let (datacenter,) = local.single_row::<(String,)>().unwrap();
-        let datacenter = datacenter.replace('\'', "''");
+        let (host_id, datacenter, rack) = local.single_row::<(Uuid, String, String)>().unwrap();
+        let replication_dc = datacenter.replace('\'', "''");
         let first = format!("quarry_cql_{}", Uuid::new_v4().simple());
         let second = format!("quarry_cql_{}", Uuid::new_v4().simple());
         for database in [&first, &second] {
+            let tablets = if test_tablets {
+                format!(" AND tablets = {{'enabled':{}}}", database == &second)
+            } else {
+                String::new()
+            };
             seed.query_unpaged(
-                format!("CREATE KEYSPACE {database} WITH replication = {{'class':'NetworkTopologyStrategy','{datacenter}':1}}"),
+                format!("CREATE KEYSPACE {database} WITH replication = {{'class':'NetworkTopologyStrategy','{replication_dc}':1}}{tablets}"),
                 &[],
             ).await.unwrap();
             seed.query_unpaged(
@@ -1237,7 +1309,60 @@ mod tests {
             timeout_ms: None,
             run_id: None,
         };
+        let (server_token,) = seed
+            .query_unpaged(
+                format!("SELECT token(tenant, bucket) FROM {first}.events WHERE tenant = 'north' AND bucket = 1 LIMIT 1"),
+                &[],
+            )
+            .await
+            .unwrap()
+            .into_rows_result()
+            .unwrap()
+            .single_row::<(i64,)>()
+            .unwrap();
         let initial = conn.read_partition(request.clone()).await.unwrap();
+        let token = Some(server_token.to_string());
+        assert_eq!(initial.diagnostics.token, token);
+        let coordinator = &initial.diagnostics.coordinator;
+        assert_eq!(coordinator.host_id, host_id);
+        assert_eq!(coordinator.datacenter.as_deref(), Some(datacenter.as_str()));
+        assert_eq!(coordinator.rack.as_deref(), Some(rack.as_str()));
+        if test_tablets || coordinator.shard.is_none() {
+            assert_eq!(
+                initial.diagnostics.placement,
+                Some(PartitionPlacement::TokenRing)
+            );
+            assert_eq!(initial.diagnostics.replicas.len(), 1);
+            let replica = &initial.diagnostics.replicas[0];
+            assert_eq!(replica.host_id, host_id);
+            assert_eq!(replica.datacenter, coordinator.datacenter);
+            assert_eq!(replica.rack, coordinator.rack);
+            assert_eq!(replica.shard.is_some(), test_tablets);
+        }
+        if test_tablets {
+            let mut tablet_request = request.clone();
+            tablet_request.database = second.clone();
+            let mut tablet_page = conn.read_partition(tablet_request.clone()).await.unwrap();
+            // The driver applies tablet updates in its background cluster worker.
+            // With the V1 protocol, it only learns a tablet after a misrouted read.
+            for _ in 0..16 {
+                if !tablet_page.diagnostics.replicas.is_empty() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                tablet_page = conn.read_partition(tablet_request.clone()).await.unwrap();
+            }
+            assert_eq!(tablet_page.diagnostics.token, token);
+            assert_eq!(
+                tablet_page.diagnostics.placement,
+                Some(PartitionPlacement::Tablets)
+            );
+            assert_eq!(tablet_page.diagnostics.coordinator.host_id, host_id);
+            assert!(tablet_page.diagnostics.coordinator.shard.is_some());
+            assert_eq!(tablet_page.diagnostics.replicas.len(), 1);
+            assert_eq!(tablet_page.diagnostics.replicas[0].host_id, host_id);
+            assert!(tablet_page.diagnostics.replicas[0].shard.is_some());
+        }
         assert!(initial.result.results[0]
             .columns
             .iter()
@@ -1247,6 +1372,8 @@ mod tests {
         different.keys[0].value = "south".into();
         assert!(conn.read_partition(different).await.is_err());
         let next = conn.read_partition(request.clone()).await.unwrap();
+        assert_eq!(next.diagnostics.token, token);
+        assert_eq!(next.diagnostics.coordinator.host_id, host_id);
         assert_eq!(next.result.results[0].rows.len(), 1);
         let sequence = next.result.results[0]
             .columns

@@ -21,6 +21,7 @@ import { installTestBackend, type TestBackend } from "@/lib/testBackend.ts";
 import { click, closeDom, mount, type MountedComponent } from "@/lib/testRender.tsx";
 import type {
   DriverDescriptor,
+  PartitionPage,
   PartitionRequest,
   RankCandidatesRequest,
   RankCandidatesResponse,
@@ -971,14 +972,27 @@ test("CQL partition paging stays bound to its source connection", async (t) => {
     read_partition: (args) => {
       const { continuation } = args?.request as PartitionRequest;
       const rows = continuation ? [["north", 24, 2]] : [["north", 24, 1]];
+      const coordinator = {
+        hostId: continuation ? "node2" : "node1",
+        address: continuation ? "10.0.0.2:9042" : "10.0.0.1:9042",
+        datacenter: "eu-west",
+        rack: continuation ? "rack2" : "rack1",
+        shard: continuation ? 5 : 0,
+      };
       return {
         continuation: continuation ? "third-token" : "next-token",
+        diagnostics: {
+          token: "-9223372036854775807",
+          placement: "tablets",
+          coordinator,
+          replicas: continuation ? [] : [coordinator],
+        },
         result: { totalMs: 1, results: [{
           statement: "SELECT * FROM tracking.shipments WHERE region = ? AND bucket = ?",
           isQuery: true, columns: [...partitionKeys, { name: "sequence", dataType: "int" }],
           rows, rowCount: rows.length, executionMs: 1, truncated: false,
         }] },
-      };
+      } satisfies PartitionPage;
     },
   });
   seed();
@@ -1003,6 +1017,16 @@ test("CQL partition paging stays bound to its source connection", async (t) => {
     }
   });
   await click(view, "Read partition");
+  const summary = view.container.querySelector<HTMLElement>("details > summary");
+  const diagnostics = summary?.closest("details");
+  assert.equal(summary?.textContent, "Partition diagnostics");
+  assert.equal(diagnostics?.open, false);
+  await act(async () => summary?.click());
+  assert.equal(diagnostics?.open, true);
+  assert.match(diagnostics?.textContent ?? "", /-9223372036854775807/);
+  assert.match(diagnostics?.textContent ?? "", /10\.0\.0\.1:9042/);
+  assert.match(diagnostics?.textContent ?? "", /Known tablet replicas \(1\)/);
+  assert.match(diagnostics?.textContent ?? "", /Shard 0/);
   await act(async () => {
     const workspace = useWorkspace.getState();
     await workspace.connect({ profileId: otherSession.profileId }, otherSession.name);
@@ -1014,6 +1038,10 @@ test("CQL partition paging stays bound to its source connection", async (t) => {
   assert.equal(tabs.find(({ id }) => id === activeTabId)?.sessionId, null);
   assert.match(view.container.querySelector("footer")?.textContent ?? "", new RegExp(cql.session.name));
   await click(view, "Next page");
+  assert.equal(diagnostics?.open, true);
+  assert.match(diagnostics?.textContent ?? "", /10\.0\.0\.2:9042/);
+  assert.match(diagnostics?.textContent ?? "", /Tablet placement is unavailable for this token/);
+  assert.doesNotMatch(diagnostics?.textContent ?? "", /10\.0\.0\.1:9042/);
   assert.deepEqual(backend.argsFor("read_partition").map((args) => args?.connectionId), [cql.session.id, cql.session.id]);
   const calls = backend.argsFor("read_partition").map((args) => args?.request as PartitionRequest);
   assert.deepEqual(calls.map(({ keys, continuation }) => ({ keys, continuation })), [

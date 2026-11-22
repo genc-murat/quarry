@@ -22,6 +22,8 @@ import type {
   ObjectActionRequest,
   ObjectSectionActionRequest,
   ObjectSectionRequest,
+  PartitionNode,
+  PartitionPage,
   PartitionRequest,
   QueryRequest,
   QueryResponse,
@@ -441,10 +443,20 @@ export async function mockInvoke<T>(cmd: string, args?: Record<string, unknown>)
       const offset = Number(request.continuation ?? 0);
       const limit = Math.max(1, Math.min(request.pageSize, 1000));
       const end = offset + limit;
+      const replicas: PartitionNode[] = [
+        { hostId: "3f927f72-be2a-419e-982f-06e53abaf9eb", address: "127.0.0.1:9042", datacenter: "datacenter1", rack: "rack1", shard: null },
+        { hostId: "d7fda232-90fa-46ea-8659-07c1a564ee3f", address: "127.0.0.2:9042", datacenter: "datacenter1", rack: "rack2", shard: null },
+      ];
       return respond({
         result: cqlResult('SELECT * FROM "tracking"."shipments" WHERE "region" = ? AND "month" = ?', rows.slice(offset, end), false),
         continuation: end < rows.length ? String(end) : null,
-      });
+        diagnostics: {
+          token: rows.length === 0 ? null : region.value === "north" ? "1011097026259096257" : "5307159102759377782",
+          placement: "tokenRing",
+          coordinator: replicas[offset === 0 ? 0 : 1],
+          replicas: rows.length > 0 ? replicas : [],
+        },
+      } satisfies PartitionPage);
     }
     case "execute_query": {
       const request = (args?.request as QueryRequest) ?? { sql: "SELECT 1" };

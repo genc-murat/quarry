@@ -12,6 +12,7 @@ import type {
   ObjectActionRequest,
   ObjectDetail,
   OpenSessionRequest,
+  PartitionDiagnostics,
   PartitionKeyValue,
   QueryLanguage,
   QueryResponse,
@@ -157,7 +158,13 @@ export interface QueryTab {
   editSource: EditSource | null;
   /** Pagination window for a table preview. */
   preview: { limit: number; offset: number } | null;
-  partition?: { keys: PartitionKeyValue[]; pageSize: number; continuation: string | null; offset: number };
+  partition?: {
+    keys: PartitionKeyValue[];
+    pageSize: number;
+    continuation: string | null;
+    offset: number;
+    diagnostics?: PartitionDiagnostics;
+  };
   result: QueryResponse | null;
   resultSource: ResultSource | null;
   /** Latest EXPLAIN output, shown in place of the grid until cleared. */
@@ -1231,7 +1238,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
     const runId = crypto.randomUUID();
     get().updateTab(tabId, { runId, running: true, cancelled: false, error: null });
     try {
-      const { result, continuation } = await ipc.readPartition(ref.sessionId, {
+      const { result, continuation, diagnostics } = await ipc.readPartition(ref.sessionId, {
         database: ref.database,
         table: ref.object,
         keys: partition.keys,
@@ -1248,7 +1255,7 @@ export const useWorkspace = create<WorkspaceState>((set, get) => ({
       }
       const offset = next ? partition.offset + (tab.result?.results[0]?.rows.length ?? 0) : 0;
       get().updateTab(tabId, {
-        partition: { ...partition, offset, continuation },
+        partition: { ...partition, offset, continuation, diagnostics },
         result,
         resultSource: {
           title: tab.title,

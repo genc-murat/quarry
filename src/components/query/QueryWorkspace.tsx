@@ -40,6 +40,7 @@ import type { ResultSample, ResultSnapshot } from "@/lib/resultAnalysis";
 import { ObjectInspector } from "@/components/objects/ObjectInspector";
 import { AssistantIndicator } from "@/components/query/AssistantIndicator";
 import { DatabaseSelect } from "@/components/query/DatabaseSelect";
+import { PartitionDiagnosticsPanel } from "@/components/query/PartitionDiagnosticsPanel";
 import { PlanPanel } from "@/components/query/PlanPanel";
 import { ResultAnalysisDialog } from "@/components/query/ResultAnalysisDialog";
 import { StatementRiskBadge } from "@/components/query/StatementRiskBadge";
@@ -712,6 +713,8 @@ export function QueryWorkspace() {
   if (tab.partition && tab.objectRef) {
     const { partition, objectRef } = tab;
     const rowCount = tab.result?.results[0]?.rows.length ?? 0;
+    const missingTabletPlacement = partition.diagnostics?.placement === "tablets"
+      && partition.diagnostics.replicas.length === 0;
     return (
       <div className="flex h-full min-h-0 flex-col">
         <div className="space-y-2 border-b border-border bg-surface/60 px-3 py-2">
@@ -732,8 +735,8 @@ export function QueryWorkspace() {
               <Button size="xs" variant="outline" disabled={!partition.continuation || !session}
                 onClick={() => void readPartitionPage(tab.id, true)}>Next page</Button>
             )}
-            {tab.error || tab.cancelled ? (
-              <Button size="xs" variant="ghost" disabled={!session} onClick={() => void readPartitionPage(tab.id)}>Reload partition</Button>
+            {tab.error || tab.cancelled || (missingTabletPlacement && partition.offset === 0 && !partition.continuation) ? (
+              <Button size="xs" variant="ghost" disabled={tab.running || !session} onClick={() => void readPartitionPage(tab.id)}>Reload partition</Button>
             ) : null}
             <Button size="xs" variant="ghost" disabled={!session}
               onClick={() => openObjectDialog({ kind: "partition", ref: objectRef })}>Open another partition</Button>
@@ -744,6 +747,7 @@ export function QueryWorkspace() {
             {rowCount ? <span className="ml-auto tabular-nums">{partition.offset + 1}–{partition.offset + rowCount}</span> : null}
           </div>
         </div>
+        {partition.diagnostics ? <PartitionDiagnosticsPanel key={tab.id} diagnostics={partition.diagnostics} /> : null}
         <div className="min-h-0 flex-1">
           <ResultsGrid result={tab.result} error={tab.error} running={tab.running} cancelled={tab.cancelled}
             cancelledMessage={stoppedWaiting}

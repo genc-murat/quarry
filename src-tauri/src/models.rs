@@ -347,6 +347,33 @@ pub struct PartitionRequest {
 pub struct PartitionPage {
     pub result: QueryResponse,
     pub continuation: Option<String>,
+    pub diagnostics: PartitionDiagnostics,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionDiagnostics {
+    pub token: Option<String>,
+    pub placement: Option<PartitionPlacement>,
+    pub coordinator: PartitionNode,
+    pub replicas: Vec<PartitionNode>,
+}
+
+#[derive(Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum PartitionPlacement {
+    TokenRing,
+    Tablets,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PartitionNode {
+    pub host_id: uuid::Uuid,
+    pub address: String,
+    pub datacenter: Option<String>,
+    pub rack: Option<String>,
+    pub shard: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

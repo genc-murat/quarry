@@ -659,6 +659,9 @@ bundle it found in the target directory before it exits.
   **Next page** follows the cluster's paging state. The **CQL keys** inspector tab shows the
   partition and clustering keys in order. Use both sets together to compare individual rows in
   **Analysis → Compare**. Each partition page is captured separately when you take a snapshot.
+- Expand **Partition diagnostics** to see the partition token, the last page's coordinator,
+  and the replicas known to the driver. ScyllaDB shows shard numbers when available and identifies
+  tablet placement from the driver's metadata.
 - The first release covers reads and generic CSV/JSON result exports. The partition form supports
   scalar keys, including UUIDs and exact decimals. Use the CQL editor for composite value types
   such as frozen collections. The demo uses `tracking.shipments` with region `north` and month
